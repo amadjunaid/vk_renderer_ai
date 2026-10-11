@@ -29,6 +29,7 @@ that will have to be torn out later.
 | C++ compiler | MSVC 2022 (Visual Studio Build Tools are enough), GCC 11+, or Clang 14+ |
 | [Vulkan SDK](https://vulkan.lunarg.com) | Provides the loader, validation layers and `glslc` |
 | Git | Used by CMake to fetch GLFW |
+| [C/C++ extension for VS Code](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools) | Only needed to debug or to get IntelliSense; provides the `cppvsdbg` debug type |
 
 On Windows, one way to get everything:
 
@@ -54,6 +55,14 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config RelWithDebInfo
 .\build\bin\vk_triangle.exe
 ```
+
+### Debugging (VS Code, Windows)
+
+`.vscode/launch.json` ships a `Debug (MSVC)` configuration: pressing F5 builds the
+Debug configuration and launches it under `cppvsdbg`, with the renderer's console
+output in the integrated terminal. `cppvsdbg` comes from the C/C++ extension
+(`ms-vscode.cpptools`), which `.vscode/extensions.json` recommends; without it F5
+fails with *"The debug type 'cppvsdbg' is not supported"*.
 
 ### Ninja or Linux
 
