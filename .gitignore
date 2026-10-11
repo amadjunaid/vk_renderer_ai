@@ -3,6 +3,7 @@
 /out/
 [Bb]uild/
 cmake-build-*/
+/build-glslang/
 
 # CMake
 CMakeCache.txt

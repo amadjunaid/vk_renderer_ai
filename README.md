@@ -12,6 +12,10 @@ that will have to be torn out later.
   (falls back to a warning if the layer is not installed).
 - Picks a physical device that has a graphics queue, a present queue and `VK_KHR_swapchain`,
   preferring a discrete GPU.
+- Runs on Windows, Linux and macOS. On macOS that means MoltenVK, so the renderer enables
+  `VK_KHR_portability_enumeration` (with its create flag) and `VK_KHR_portability_subset`
+  wherever the loader and device advertise them. Both are conditional, so one code path
+  works on every platform.
 - Builds a swapchain, image views and framebuffers, and recreates them on window resize
   or minimize/restore.
 - Compiles GLSL to SPIR-V at build time and creates a graphics pipeline from it.
@@ -27,10 +31,12 @@ that will have to be torn out later.
 | --- | --- |
 | CMake | 3.20 or newer |
 | C++ compiler | MSVC 2022 (Visual Studio Build Tools are enough), GCC 11+, or Clang 14+ |
-| [Vulkan SDK](https://vulkan.lunarg.com) | Provides the loader, validation layers and `glslc` |
+| [Vulkan SDK](https://vulkan.lunarg.com) | Provides the loader, validation layers and `glslc`. On macOS, MoltenVK is mandatory — Windows and Linux have native drivers. |
 | Git | Used by CMake to fetch GLFW |
 
-On Windows, one way to get everything:
+GLFW 3.4 is downloaded automatically by CMake, so it does not need to be installed.
+
+**Windows** — one way to get everything:
 
 ```powershell
 winget install --id Kitware.CMake -e
@@ -38,9 +44,37 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quie
 winget install --id KhronosGroup.VulkanSDK -e
 ```
 
-GLFW 3.4 is downloaded automatically by CMake, so it does not need to be installed.
-If the Vulkan SDK is missing, CMake falls back to the Khronos headers plus the system
-`vulkan-1` loader; that path builds fine but cannot enable validation.
+If the SDK is missing, CMake falls back to the Khronos headers plus the `vulkan-1` loader
+that ships with the GPU driver. That builds fine but cannot enable validation.
+
+**Linux** — the loader, headers, validation layers and `glslc` all come from distro
+packages (exact names vary a little between distributions):
+
+```bash
+# Debian / Ubuntu
+sudo apt install build-essential cmake git ninja-build \
+    libvulkan-dev vulkan-validationlayers \
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+```
+
+The `libx*` packages are GLFW's X11 backend. For Wayland instead, use
+`libwayland-dev libxkbcommon-dev` — GLFW picks the backend at configure time.
+
+For SPIR-V compilation you need `glslc` (from the Vulkan SDK, or your distribution's
+`glslc`/`shaderc` package) or `glslangValidator` (from `glslang-tools`). The build accepts
+either.
+
+**macOS** — macOS has no Vulkan driver of its own, so MoltenVK translates to Metal.
+Install the LunarG macOS SDK (it bundles MoltenVK, the loader and `glslc`) and point
+`VULKAN_SDK` at it:
+
+```bash
+export VULKAN_SDK="$HOME/VulkanSDK/1.4.363.0"   # match the version you installed
+export PATH="$VULKAN_SDK/bin:$PATH"
+```
+
+Homebrew's `molten-vk` also works, but `find_package(Vulkan)` will not discover it on its
+own, so pass `-DVulkan_INCLUDE_DIR=... -DVulkan_LIBRARY=...` explicitly.
 
 ## Build and run
 
@@ -55,7 +89,7 @@ cmake --build build --config RelWithDebInfo
 .\build\bin\vk_triangle.exe
 ```
 
-### Ninja or Linux
+### Linux / macOS (Ninja)
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -63,7 +97,10 @@ cmake --build build
 ./build/bin/vk_triangle
 ```
 
-If CMake cannot find `glslc`, pass it explicitly:
+On macOS, launch it from a terminal. The binary is not inside a `.app` bundle, so the
+window opens without focus — click it once.
+
+If CMake cannot find a shader compiler, pass one explicitly:
 
 ```powershell
 cmake -S . -B build -DGLSL_COMPILER="C:/VulkanSDK/1.4.363.0/Bin/glslc.exe"
@@ -71,12 +108,33 @@ cmake -S . -B build -DGLSL_COMPILER="C:/VulkanSDK/1.4.363.0/Bin/glslc.exe"
 
 ### Verifying the output
 
-`tools/capture_window.ps1` screenshots the running window and samples a few known
-pixel positions, which is handy after changing the triangle or the clear color:
+`tools/capture_window.ps1` screenshots the running window and samples a few known pixel
+positions, which is handy after changing the triangle or the clear color:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/capture_window.ps1 -Out build/verify.png
 ```
+
+It is Windows-only (it uses `PrintWindow` via P/Invoke). On Linux use
+`import -window root out.png` (ImageMagick) or `grim` under Wayland; on macOS use
+`screencapture -x out.png`.
+
+## Platform notes
+
+**Shader compiler.** The build looks for `glslc` first and falls back to
+`glslangValidator` (invoked with `-V`), since some Linux distributions package only the
+latter. Both produce the same SPIR-V; `glslc` ships with the Vulkan SDK, `glslangValidator`
+comes from `glslang-tools`.
+
+**Validation layers** are optional on every platform. If `VK_LAYER_KHRONOS_validation` is
+missing, the renderer prints a warning and continues without it.
+
+**macOS** needs the portability extensions described above; this is handled automatically,
+but it is why the code checks extension availability before enabling anything.
+
+**`.vscode/launch.json`** has one configuration per platform — pick the one matching your
+OS (Windows uses `cppvsdbg`, macOS/Linux use `cppdbg` with lldb/gdb). The build task is
+shared because `--config` is ignored by single-config generators.
 
 ## Project layout
 

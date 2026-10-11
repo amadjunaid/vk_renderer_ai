@@ -39,6 +39,65 @@ const char* deviceTypeName(VkPhysicalDeviceType type) {
     }
 }
 
+/// True when the loader advertises the given instance extension.
+///
+/// Local to this file: whether an extension exists is a property of the loader,
+/// not of the renderer's state.
+bool hasInstanceExtension(const char* name) {
+    std::uint32_t count = 0;
+    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) != VK_SUCCESS || count == 0) {
+        return false;
+    }
+
+    std::vector<VkExtensionProperties> available(count);
+    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data()) != VK_SUCCESS) {
+        return false;
+    }
+
+    return std::any_of(available.begin(), available.end(),
+                       [name](const VkExtensionProperties& ext) {
+                           return std::string(ext.extensionName) == name;
+                       });
+}
+
+/// True when the physical device advertises the given device extension.
+bool hasDeviceExtension(VkPhysicalDevice device, const char* name) {
+    std::uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> available(count);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data());
+
+    return std::any_of(available.begin(), available.end(),
+                       [name](const VkExtensionProperties& ext) {
+                           return std::string(ext.extensionName) == name;
+                       });
+}
+
+/// Name of the VK_KHR_portability_subset extension.
+///
+/// Spelled out instead of using VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME: that
+/// macro lives in vulkan_beta.h, which vulkan.h only includes when
+/// VK_ENABLE_BETA_EXTENSIONS is defined. Only the name string is needed to
+/// enable the extension, so a local constant keeps every provisional extension
+/// out of the rest of the build.
+constexpr const char* kPortabilitySubsetExtension = "VK_KHR_portability_subset";
+
+/// Extensions the logical device must enable.
+///
+/// VK_KHR_swapchain is needed to present. VK_KHR_portability_subset is
+/// advertised by portability implementations (MoltenVK on macOS, and portability
+/// drivers elsewhere) and the spec requires it to be enabled whenever it is
+/// present - vkCreateDevice fails otherwise.
+std::vector<const char*> requiredDeviceExtensions(VkPhysicalDevice device) {
+    std::vector<const char*> extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    if (hasDeviceExtension(device, kPortabilitySubsetExtension)) {
+        extensions.push_back(kPortabilitySubsetExtension);
+    }
+
+    return extensions;
+}
+
 }  // namespace
 
 VulkanContext::VulkanContext(const Window& window, bool enableValidation) {
@@ -97,7 +156,7 @@ bool VulkanContext::checkValidationLayerSupport() {
     });
 }
 
-std::vector<const char*> VulkanContext::requiredInstanceExtensions() const {
+std::vector<const char*> VulkanContext::requiredInstanceExtensions(bool portabilityEnumeration) const {
     std::uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
     if (glfwExtensions == nullptr || glfwExtensionCount == 0) {
@@ -105,9 +164,20 @@ std::vector<const char*> VulkanContext::requiredInstanceExtensions() const {
     }
 
     std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-    if (validationEnabled_) {
+
+    if (portabilityEnumeration) {
+        // Without this the macOS loader hides MoltenVK and
+        // vkEnumeratePhysicalDevices reports zero devices. On platforms that do
+        // not need it the extension is simply absent and this is skipped.
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+
+    // VK_EXT_debug_utils is supplied by the validation layer rather than the
+    // loader, so check for it instead of assuming it is there.
+    if (validationEnabled_ && hasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+
     return extensions;
 }
 
@@ -127,10 +197,17 @@ void VulkanContext::createInstance() {
     }
     appInfo.apiVersion = std::min(supportedVersion, static_cast<std::uint32_t>(VK_API_VERSION_1_2));
 
-    const std::vector<const char*> extensions = requiredInstanceExtensions();
+    const bool portabilityEnumeration =
+        hasInstanceExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    const std::vector<const char*> extensions = requiredInstanceExtensions(portabilityEnumeration);
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    if (portabilityEnumeration) {
+        // The flag only affects enumeration, so it stays paired with the
+        // extension above: setting one without the other is a validation error.
+        createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
     createInfo.pApplicationInfo = &appInfo;
     createInfo.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
@@ -220,23 +297,12 @@ SwapchainSupport VulkanContext::querySwapchainSupport(VkPhysicalDevice device) c
     return details;
 }
 
-bool VulkanContext::supportsRequiredDeviceExtensions(VkPhysicalDevice device) {
-    std::uint32_t extensionCount = 0;
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
-    std::vector<VkExtensionProperties> extensions(extensionCount);
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
-
-    return std::any_of(extensions.begin(), extensions.end(), [](const VkExtensionProperties& ext) {
-        return std::string(ext.extensionName) == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    });
-}
-
 int VulkanContext::scorePhysicalDevice(VkPhysicalDevice device) const {
     // -1 means "cannot be used at all".
     if (!queryQueueFamilies(device).isComplete()) {
         return -1;
     }
-    if (!supportsRequiredDeviceExtensions(device)) {
+    if (!hasDeviceExtension(device, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
         return -1;
     }
     if (!querySwapchainSupport(device).isAdequate()) {
@@ -307,15 +373,15 @@ void VulkanContext::createLogicalDevice() {
     // A single hard-coded triangle needs no optional device features.
     VkPhysicalDeviceFeatures features{};
 
-    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const std::vector<const char*> deviceExtensions = requiredDeviceExtensions(physicalDevice_);
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = &features;
-    createInfo.enabledExtensionCount = 1;
-    createInfo.ppEnabledExtensionNames = deviceExtensions;
+    createInfo.enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
     // Device level validation layers are deprecated and ignored by modern
     // loaders; the instance level layer already covers the whole device.

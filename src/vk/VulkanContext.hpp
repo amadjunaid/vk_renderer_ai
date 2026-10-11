@@ -58,9 +58,8 @@ private:
     void pickPhysicalDevice();
     void createLogicalDevice();
 
-    std::vector<const char*> requiredInstanceExtensions() const;
+    std::vector<const char*> requiredInstanceExtensions(bool portabilityEnumeration) const;
     int scorePhysicalDevice(VkPhysicalDevice device) const;
-    static bool supportsRequiredDeviceExtensions(VkPhysicalDevice device);
     static bool checkValidationLayerSupport();
 
     static constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";

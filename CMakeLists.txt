@@ -39,12 +39,22 @@ FetchContent_MakeAvailable(glfw)
 
 find_package(Vulkan QUIET)
 if(NOT Vulkan_FOUND)
+    if(APPLE)
+        # The loader/headers fallback below cannot work here: macOS has no
+        # Vulkan driver of its own, only MoltenVK layered on Metal.
+        message(FATAL_ERROR
+            "Vulkan was not found. macOS has no native Vulkan implementation, so MoltenVK "
+            "is required. Install the LunarG macOS SDK (https://vulkan.lunarg.com) and "
+            "re-run CMake, or point CMake at an existing MoltenVK with "
+            "-DVulkan_INCLUDE_DIR=... -DVulkan_LIBRARY=...")
+    endif()
+
     # No Vulkan SDK installed: use the Khronos headers and link the loader that
     # ships with the GPU driver. Fine for plain (non-validation) builds.
     message(STATUS "Vulkan SDK not found - falling back to Vulkan-Headers + system loader")
     FetchContent_Declare(vulkan_headers
         GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-        GIT_TAG vulkan-sdk-1.3.290
+        GIT_TAG vulkan-sdk-1.4.363.0
         GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(vulkan_headers)
 
@@ -61,12 +71,15 @@ endif()
 # Shaders: GLSL -> SPIR-V at build time via glslc (ships with the Vulkan SDK)
 # ---------------------------------------------------------------------------
 
+# glslc is preferred, but some Linux distributions only package glslangValidator.
 find_program(GLSL_COMPILER
-    NAMES glslc
+    NAMES glslc glslangValidator
     HINTS ENV VULKAN_SDK
     PATH_SUFFIXES Bin bin)
 
-if(NOT GLSL_COMPILER)
+if(WIN32 AND NOT GLSL_COMPILER)
+    # The Windows SDK installer does not always leave the compiler on PATH for
+    # shells opened earlier, so fall back to the default install location.
     file(GLOB _vulkan_sdk_glslc "C:/VulkanSDK/*/Bin/glslc.exe")
     if(_vulkan_sdk_glslc)
         list(SORT _vulkan_sdk_glslc)
@@ -76,10 +89,20 @@ endif()
 
 if(NOT GLSL_COMPILER)
     message(FATAL_ERROR
-        "glslc was not found. Install the Vulkan SDK (https://vulkan.lunarg.com) "
-        "or re-run CMake with -DGLSL_COMPILER=/path/to/glslc.")
+        "No shader compiler was found. Install the Vulkan SDK "
+        "(https://vulkan.lunarg.com), or 'glslang-tools' / 'shaderc' on Linux, or "
+        "'brew install shaderc' on macOS. Alternatively re-run CMake with "
+        "-DGLSL_COMPILER=/path/to/glslc.")
 endif()
-message(STATUS "glslc: ${GLSL_COMPILER}")
+
+# glslangValidator only emits Vulkan SPIR-V with -V; glslc does so by default.
+get_filename_component(GLSL_COMPILER_NAME "${GLSL_COMPILER}" NAME)
+if(GLSL_COMPILER_NAME MATCHES "^glslangValidator")
+    set(GLSL_COMPILER_ARGS -V)
+else()
+    set(GLSL_COMPILER_ARGS "")
+endif()
+message(STATUS "shader compiler: ${GLSL_COMPILER} ${GLSL_COMPILER_ARGS}")
 
 set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
@@ -94,7 +117,7 @@ foreach(shader ${SHADER_SOURCES})
     add_custom_command(
         OUTPUT ${spirv_file}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-        COMMAND ${GLSL_COMPILER} ${shader} -o ${spirv_file}
+        COMMAND ${GLSL_COMPILER} ${GLSL_COMPILER_ARGS} ${shader} -o ${spirv_file}
         DEPENDS ${shader}
         COMMENT "Compiling ${shader_name} -> SPIR-V"
         VERBATIM)
@@ -131,9 +154,9 @@ add_dependencies(vk_triangle vk_shaders)
 
 if(MSVC)
     target_compile_options(vk_triangle PRIVATE /W4 /permissive- /utf-8)
+    # Visual Studio only: makes F5 start the binary from the build tree.
+    set_target_properties(vk_triangle PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 else()
     target_compile_options(vk_triangle PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
-set_target_properties(vk_triangle PROPERTIES
-    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

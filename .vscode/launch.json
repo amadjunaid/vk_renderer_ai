@@ -1,11 +1,15 @@
 {
-    // F5 builds the Debug configuration and launches it under the MSVC debugger.
-    // "cppvsdbg" comes from the C/C++ extension (ms-vscode.cpptools) and is the
-    // debugger that understands MSVC debug information (PDB).
+    // F5 builds the Debug configuration and launches it. Pick the entry that
+    // matches your platform; the pre-launch task works everywhere because it
+    // only passes --config, which single-config generators ignore.
+    //
+    // Windows uses cppvsdbg (the MSVC debugger that reads PDBs). macOS and Linux
+    // use cppdbg, which drives lldb / gdb. All three come from the C/C++
+    // extension (ms-vscode.cpptools).
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug (MSVC)",
+            "name": "Debug (Windows, MSVC)",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/bin/vk_triangle.exe",
@@ -18,6 +22,32 @@
             "console": "integratedTerminal",
             // CMake bakes the absolute path of the compiled SPIR-V into the
             // binary, so cwd does not affect shader loading.
+            "preLaunchTask": "cmake: build Debug"
+        },
+        {
+            "name": "Debug (macOS, lldb)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/vk_triangle",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "cmake: build Debug"
+        },
+        {
+            "name": "Debug (Linux, gdb)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/vk_triangle",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
             "preLaunchTask": "cmake: build Debug"
         }
     ]

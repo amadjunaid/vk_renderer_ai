@@ -1,6 +1,7 @@
 {
-    // Ctrl+Shift+B runs the default build task (Debug). Run "cmake: configure"
-    // once after cloning, or whenever CMakeLists.txt gains new source files.
+    // Ctrl+Shift+B runs the default build task (Debug). Run one of the configure
+    // tasks once after cloning: the Visual Studio generator on Windows, Ninja
+    // elsewhere. Re-run it whenever CMakeLists.txt gains new source files.
     "version": "2.0.0",
     "tasks": [
         {
@@ -50,7 +51,7 @@
             }
         },
         {
-            "label": "cmake: configure",
+            "label": "cmake: configure (Visual Studio)",
             "type": "shell",
             "command": "cmake",
             "args": [
@@ -62,6 +63,31 @@
                 "Visual Studio 17 2022",
                 "-A",
                 "x64"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            // macOS and Linux use a single-config generator, so the build type
+            // is chosen at configure time instead of with --config.
+            "label": "cmake: configure (Ninja)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S",
+                "${workspaceFolder}",
+                "-B",
+                "${workspaceFolder}/build",
+                "-G",
+                "Ninja",
+                "-DCMAKE_BUILD_TYPE=Debug"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
