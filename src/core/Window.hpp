@@ -37,6 +37,9 @@ public:
 
     VkSurfaceKHR createSurface(VkInstance instance) const;
 
+    /// The raw GLFW handle, needed by the ImGui GLFW backend.
+    GLFWwindow* handle() const { return window_; }
+
 private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vk/DebugUi.hpp"
+
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
@@ -16,7 +18,10 @@ class GraphicsPipeline;
 /// pool and buffers, and the frame synchronisation objects.
 class Renderer {
 public:
-    Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir);
+    /// enableDebugUi adds the ImGui menu bar and toolbar. With it disabled the
+    /// frame path stays a pure triangle render.
+    Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
+             bool enableDebugUi = true);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -29,9 +34,6 @@ private:
     /// Frames the CPU may prepare while the GPU is still working on earlier ones.
     static constexpr std::uint32_t kMaxFramesInFlight = 2;
 
-    /// Speed of the triangle's spin, in radians per second.
-    static constexpr float kRotationSpeed = 0.75f;
-
     void drawFrame();
 
     void createCommandPool();
@@ -42,6 +44,10 @@ private:
     void createSyncObjects();
     void destroySyncObjects();
 
+    /// Advances rotationAngle_ using the time since the previous frame, so
+    /// pausing and resuming the spin does not make it jump.
+    void advanceRotation();
+
     void recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t imageIndex);
     void recreateSwapchain();
 
@@ -49,12 +55,22 @@ private:
     const Window& window_;
     std::string shaderDir_;
 
+    /// Editable at runtime from the toolbar.
+    RendererSettings settings_;
+
     std::unique_ptr<Swapchain> swapchain_;
     std::unique_ptr<GraphicsPipeline> pipeline_;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
     std::vector<VkFramebuffer> framebuffers_;
+
+    /// Declared last so it is torn down before the render pass it points at.
+    std::unique_ptr<DebugUi> debugUi_;
+
+    /// Current spin angle, kept in [0, 2pi) to stay precise over long runs.
+    float rotationAngle_ = 0.0f;
+    double previousFrameTime_ = 0.0;
 
     /// Signalled when the swapchain image the CPU wants is ready.
     std::vector<VkSemaphore> imageAvailable_;

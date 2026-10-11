@@ -38,6 +38,7 @@ public:
     VulkanContext(const VulkanContext&) = delete;
     VulkanContext& operator=(const VulkanContext&) = delete;
 
+    VkInstance instance() const { return instance_; }
     VkSurfaceKHR surface() const { return surface_; }
     VkPhysicalDevice physicalDevice() const { return physicalDevice_; }
     VkDevice device() const { return device_; }
@@ -47,6 +48,10 @@ public:
 
     std::uint32_t graphicsFamily() const { return graphicsFamily_; }
     std::uint32_t presentFamily() const { return presentFamily_; }
+
+    /// The version the instance was created with. Backends (ImGui) need it, and
+    /// it is not always VK_API_VERSION_1_2 - older loaders can report less.
+    std::uint32_t apiVersion() const { return apiVersion_; }
 
     QueueFamilyIndices queryQueueFamilies(VkPhysicalDevice device) const;
     SwapchainSupport querySwapchainSupport(VkPhysicalDevice device) const;
@@ -75,6 +80,8 @@ private:
 
     std::uint32_t graphicsFamily_ = 0;
     std::uint32_t presentFamily_ = 0;
+
+    std::uint32_t apiVersion_ = VK_API_VERSION_1_0;
 
     bool validationEnabled_ = false;
 };

@@ -24,6 +24,9 @@ that will have to be torn out later.
 - Triangles are generated in the vertex shader, so no vertex buffer or descriptor sets
   are involved yet. The rotation is a push constant, and the vertex shader turns that
   angle into a 2D rotation matrix.
+- Draws a Dear ImGui menu bar and toolbar into the same render pass as the triangle, so
+  the UI needs no render pass, framebuffers or descriptor sets of its own. The toolbar
+  drives the rotation speed at runtime.
 
 ## Requirements
 
@@ -139,7 +142,7 @@ shared because `--config` is ignored by single-config generators.
 ## Project layout
 
 ```
-CMakeLists.txt              build: fetches GLFW, finds Vulkan + glslc, compiles shaders
+CMakeLists.txt              build: fetches GLFW + Dear ImGui, finds Vulkan + glslc
 shaders/
   triangle.vert             positions/colors from gl_VertexIndex, rotated by a push constant
   triangle.frag             passes the interpolated color through
@@ -150,6 +153,7 @@ src/
   vk/VulkanContext.hpp/.cpp instance, debug messenger, surface, device, queues
   vk/Swapchain.hpp/.cpp     swapchain, image views, format/present-mode/extent selection
   vk/GraphicsPipeline.hpp/.cpp  render pass and the triangle pipeline
+  vk/DebugUi.hpp/.cpp       ImGui menu bar and toolbar, sharing the render pass
   vk/Renderer.hpp/.cpp      framebuffers, command pool/buffers, sync, the frame loop
 tools/
   capture_window.ps1        screenshots the running window and samples pixels
@@ -169,13 +173,39 @@ Each iteration of `Renderer::drawFrame()`:
 3. Waits on the fence of the frame that last used that image, so the CPU never writes
    a command buffer that is still executing.
 4. Records the command buffer: begin render pass, bind pipeline, push the rotation
-   angle, set the dynamic viewport and scissor, `vkCmdDraw(3, 1, 0, 0)`, end render pass.
+   angle, set the dynamic viewport and scissor, `vkCmdDraw(3, 1, 0, 0)`, record the
+   ImGui draw data into that same pass, end render pass.
 5. Submits, waiting on `imageAvailable` and signalling `renderFinished`.
 6. Presents, and rebuilds the swapchain if the surface went out of date or suboptimal
    (`VK_ERROR_OUT_OF_DATE_KHR`, `VK_SUBOPTIMAL_KHR`) or the window was resized.
 
 Viewport and scissor are dynamic state, so a resize never invalidates the pipeline.
 The pipeline is only rebuilt if the swapchain image format actually changes.
+
+## Debug UI
+
+`DebugUi` wraps Dear ImGui (fetched by CMake and pinned to a release tag) and gives the
+window a menu bar and a toolbar. The design choice that matters is that **ImGui shares the
+render pass `GraphicsPipeline` already created** rather than owning one:
+
+- The Vulkan backend records draw commands into whatever render pass is active. It only
+  calls `vkCmdBeginRenderPass` from the `ImGui_ImplVulkanH_*` helpers, which this project
+  does not use.
+- So the UI needs no render pass, no framebuffers and no image views of its own. There is
+  nothing to rebuild on a resize, and the triangle and the UI are one pass over one image.
+- The render pass is handed over through
+  `ImGui_ImplVulkan_InitInfo::PipelineInfoMain.RenderPass` (the older top-level
+  `RenderPass` field was replaced in this release). When the swapchain format changes,
+  `GraphicsPipeline` destroys and recreates the render pass, so `onSwapchainRecreated()`
+  rebuilds the UI pipeline with `ImGui_ImplVulkan_CreateMainPipeline()` instead of
+  shutting the backend down, which would discard the ImGui context and its textures.
+- The backend creates and owns its own descriptor pool and command pool, so no Vulkan
+  state is shared with `Renderer`.
+
+Note that Dear ImGui 1.92 uploads its font atlas lazily through the renderer texture
+system (`ImGuiBackendFlags_RendererHasTextures`), so there is no `CreateFontsTexture()`
+call — that function no longer exists. Pass `false` as the last `Renderer` argument to
+render the bare triangle with no UI at all.
 
 ## Next steps
 

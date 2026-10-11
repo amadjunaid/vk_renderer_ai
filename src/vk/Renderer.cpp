@@ -1,22 +1,40 @@
 #include "vk/Renderer.hpp"
 
 #include "core/Window.hpp"
+#include "vk/DebugUi.hpp"
 #include "vk/GraphicsPipeline.hpp"
 #include "vk/Swapchain.hpp"
 #include "vk/VulkanContext.hpp"
 #include "vk/VkCheck.hpp"
 
+#include <cmath>
 #include <stdexcept>
 
-Renderer::Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir)
+namespace {
+
+constexpr float kTwoPi = 6.28318530718f;
+
+}  // namespace
+
+Renderer::Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
+                   bool enableDebugUi)
     : context_(context), window_(window), shaderDir_(shaderDir) {
     swapchain_ = std::make_unique<Swapchain>(context_, window_);
     pipeline_ = std::make_unique<GraphicsPipeline>(context_, swapchain_->imageFormat(), shaderDir_);
+
+    if (enableDebugUi) {
+        // Created after the pipeline because the UI renders into the pipeline's
+        // render pass.
+        debugUi_ = std::make_unique<DebugUi>(context_, window_, pipeline_->renderPass(),
+                                             swapchain_->imageCount(), settings_);
+    }
 
     createCommandPool();
     createFramebuffers();
     createCommandBuffers();
     createSyncObjects();
+
+    previousFrameTime_ = window_.elapsedSeconds();
 }
 
 Renderer::~Renderer() {
@@ -36,16 +54,47 @@ Renderer::~Renderer() {
         commandPool_ = VK_NULL_HANDLE;
     }
 
-    // pipeline_ and swapchain_ release their own Vulkan objects.
+    // pipeline_, swapchain_ and debugUi_ release their own Vulkan objects. They
+    // are destroyed after this body, in reverse declaration order, so the UI is
+    // gone before the render pass it draws into.
 }
 
 void Renderer::run() {
     while (!window_.shouldClose()) {
         window_.pollEvents();
+
+        if (debugUi_) {
+            // Built before the frame is recorded so toolbar edits take effect on
+            // the frame currently being drawn.
+            debugUi_->beginFrame();
+            debugUi_->buildUi();
+        }
+
         drawFrame();
+
+        // Checked after the frame so the final UI frame is completed rather than
+        // abandoned half-way through.
+        if (debugUi_ && debugUi_->wantsQuit()) {
+            break;
+        }
     }
 
     vkDeviceWaitIdle(context_.device());
+}
+
+void Renderer::advanceRotation() {
+    const double now = window_.elapsedSeconds();
+    const double delta = now - previousFrameTime_;
+    previousFrameTime_ = now;
+
+    if (!settings_.rotate) {
+        return;
+    }
+
+    // Wrapping keeps the angle small so float precision does not degrade over a
+    // long-running session.
+    rotationAngle_ = std::fmod(rotationAngle_ + static_cast<float>(delta) * settings_.rotationSpeed,
+                               kTwoPi);
 }
 
 void Renderer::createCommandPool() {
@@ -180,6 +229,12 @@ void Renderer::recreateSwapchain() {
     swapchain_->recreate(window_);
     pipeline_->recreate(swapchain_->imageFormat(), shaderDir_);
 
+    if (debugUi_) {
+        // The UI pipeline is compiled against the render pass, which
+        // GraphicsPipeline::recreate replaces whenever the format changed.
+        debugUi_->onSwapchainRecreated(pipeline_->renderPass(), swapchain_->imageCount());
+    }
+
     freeCommandBuffers();
     destroySyncObjects();
 
@@ -212,9 +267,9 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->handle());
 
     // The vertex shader builds the rotation matrix itself; the CPU only supplies
-    // the angle, which advances with wall-clock time.
-    const TrianglePushConstants pushConstants{
-        static_cast<float>(window_.elapsedSeconds()) * kRotationSpeed};
+    // the angle, which advanceRotation() has already moved on by this frame's
+    // elapsed time.
+    const TrianglePushConstants pushConstants{rotationAngle_};
     vkCmdPushConstants(commandBuffer, pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(pushConstants), &pushConstants);
 
@@ -238,8 +293,17 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
     // Three vertices, no vertex buffer, no indices.
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
-    vkCmdEndRenderPass(commandBuffer);
+    // ImGui shares this render pass, so it has to be recorded before the pass
+    // ends. Note it needs no framebuffers of its own - the backend draws into
+    // the pass that is already active.
+    if (debugUi_) {
+        debugUi_->render(commandBuffer);
+    }
 
+    vkCmdEndRenderPass(commandBuffer);
+advanceRotation();
+
+    
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 }
 

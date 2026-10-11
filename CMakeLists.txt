@@ -74,6 +74,34 @@ if(NOT Vulkan_FOUND)
 endif()
 
 # ---------------------------------------------------------------------------
+# Dear ImGui (menus and toolbars, drawn into the swapchain)
+# ---------------------------------------------------------------------------
+
+# Dear ImGui ships no CMakeLists, so the target is declared by hand. Only the
+# core plus the two backends this renderer needs are compiled - not the demo
+# window, and not the other backends.
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.92.9
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+
+target_include_directories(imgui SYSTEM PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends)
+
+target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+
+# ---------------------------------------------------------------------------
 # Shaders: GLSL -> SPIR-V at build time via glslc (ships with the Vulkan SDK)
 # ---------------------------------------------------------------------------
 
@@ -143,6 +171,7 @@ add_executable(vk_triangle
     src/vk/VulkanContext.cpp
     src/vk/Swapchain.cpp
     src/vk/GraphicsPipeline.cpp
+    src/vk/DebugUi.cpp
     src/vk/Renderer.cpp)
 
 target_include_directories(vk_triangle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -155,7 +184,7 @@ if(WIN32)
     target_compile_definitions(vk_triangle PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-target_link_libraries(vk_triangle PRIVATE glfw Vulkan::Vulkan)
+target_link_libraries(vk_triangle PRIVATE glfw Vulkan::Vulkan imgui)
 add_dependencies(vk_triangle vk_shaders)
 
 if(MSVC)

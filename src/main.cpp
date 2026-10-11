@@ -29,6 +29,9 @@ int main() {
         constexpr bool kEnableValidation = true;
 
         VulkanContext context(window, kEnableValidation);
+
+        // The ImGui menu bar and toolbar are on by default. Pass false as the
+        // last argument to render the bare triangle instead.
         Renderer renderer(context, window, SHADER_DIR);
         renderer.run();
     } catch (const std::exception& exception) {

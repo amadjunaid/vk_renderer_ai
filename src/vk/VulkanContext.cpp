@@ -196,6 +196,7 @@ void VulkanContext::createInstance() {
         supportedVersion = VK_API_VERSION_1_0;
     }
     appInfo.apiVersion = std::min(supportedVersion, static_cast<std::uint32_t>(VK_API_VERSION_1_2));
+    apiVersion_ = appInfo.apiVersion;
 
     const bool portabilityEnumeration =
         hasInstanceExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
