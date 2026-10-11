@@ -17,11 +17,12 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            // Makes MSVC errors clickable in the Problems panel.
-            "problemMatcher": ["$msCompile"],
+            "problemMatcher": [
+                "$msCompile"
+            ],
             "group": {
                 "kind": "build",
-                "isDefault": true
+                "isDefault": false
             },
             "presentation": {
                 "reveal": "always",
@@ -42,7 +43,9 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "problemMatcher": ["$msCompile"],
+            "problemMatcher": [
+                "$msCompile"
+            ],
             "group": "build",
             "presentation": {
                 "reveal": "always",

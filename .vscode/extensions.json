@@ -1,0 +1,8 @@
+{
+    // launch.json uses the "cppvsdbg" debug type and c_cpp_properties.json drives
+    // IntelliSense; both are provided by the C/C++ extension, so F5 (and error
+    // squiggles) break without it.
+    "recommendations": [
+        "ms-vscode.cpptools"
+    ]
+}

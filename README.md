@@ -37,9 +37,7 @@ that will have to be torn out later.
 | [Vulkan SDK](https://vulkan.lunarg.com) | Provides the loader, validation layers and `glslc`. On macOS, MoltenVK is mandatory — Windows and Linux have native drivers. |
 | Git | Used by CMake to fetch GLFW |
 
-GLFW 3.4 is downloaded automatically by CMake, so it does not need to be installed.
-
-**Windows** — one way to get everything:
+On Windows, one way to get everything:
 
 ```powershell
 winget install --id Kitware.CMake -e
@@ -91,6 +89,14 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config RelWithDebInfo
 .\build\bin\vk_triangle.exe
 ```
+
+### Debugging (VS Code, Windows)
+
+`.vscode/launch.json` ships a `Debug (MSVC)` configuration: pressing F5 builds the
+Debug configuration and launches it under `cppvsdbg`, with the renderer's console
+output in the integrated terminal. `cppvsdbg` comes from the C/C++ extension
+(`ms-vscode.cpptools`), which `.vscode/extensions.json` recommends; without it F5
+fails with *"The debug type 'cppvsdbg' is not supported"*.
 
 ### Linux / macOS (Ninja)
 
