@@ -1,17 +1,21 @@
 #include "vk/GraphicsPipeline.hpp"
 
-#include "vk/VulkanContext.hpp"
+#include "vk/Material.hpp"
+#include "vk/Mesh.hpp"
 #include "vk/VkCheck.hpp"
+#include "vk/VulkanContext.hpp"
 
+#include <array>
+#include <cstdint>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 
 GraphicsPipeline::GraphicsPipeline(const VulkanContext& context, VkFormat colorFormat,
-                                   const std::string& shaderDir)
-    : context_(context), colorFormat_(colorFormat) {
+                                   const Material& material)
+    : context_(context), material_(material), colorFormat_(colorFormat) {
     createRenderPass();
-    createPipeline(shaderDir);
+    createPipeline();
 }
 
 GraphicsPipeline::~GraphicsPipeline() {
@@ -35,7 +39,7 @@ void GraphicsPipeline::destroy() {
     }
 }
 
-void GraphicsPipeline::recreate(VkFormat colorFormat, const std::string& shaderDir) {
+void GraphicsPipeline::recreate(VkFormat colorFormat) {
     if (colorFormat == colorFormat_) {
         // Dynamic viewport/scissor means nothing else depends on the extent.
         return;
@@ -44,7 +48,7 @@ void GraphicsPipeline::recreate(VkFormat colorFormat, const std::string& shaderD
     destroy();
     colorFormat_ = colorFormat;
     createRenderPass();
-    createPipeline(shaderDir);
+    createPipeline();
 }
 
 void GraphicsPipeline::createRenderPass() {
@@ -118,11 +122,11 @@ VkShaderModule GraphicsPipeline::createShaderModule(VkDevice device, const std::
     return module;
 }
 
-void GraphicsPipeline::createPipeline(const std::string& shaderDir) {
+void GraphicsPipeline::createPipeline() {
     const VkDevice device = context_.device();
 
-    const std::vector<char> vertCode = readFile(shaderDir + "/triangle.vert.spv");
-    const std::vector<char> fragCode = readFile(shaderDir + "/triangle.frag.spv");
+    const std::vector<char> vertCode = readFile(material_.vertexShader());
+    const std::vector<char> fragCode = readFile(material_.fragmentShader());
 
     const VkShaderModule vertModule = createShaderModule(device, vertCode);
     const VkShaderModule fragModule = createShaderModule(device, fragCode);
@@ -141,10 +145,17 @@ void GraphicsPipeline::createPipeline(const std::string& shaderDir) {
 
     const VkPipelineShaderStageCreateInfo shaderStages[] = {vertStage, fragStage};
 
-    // The vertex shader generates the three vertices from gl_VertexIndex, so
-    // there is no vertex buffer / attribute description yet.
+    // The mesh supplies its vertices and indices from device-local buffers, so
+    // the pipeline declares the Vertex layout the vertex shader reads.
+    const VkVertexInputBindingDescription binding = Vertex::bindingDescription();
+    const std::array<VkVertexInputAttributeDescription, 2> attributes = Vertex::attributeDescriptions();
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+    vertexInput.pVertexAttributeDescriptions = attributes.data();
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;

@@ -79,7 +79,7 @@ DebugUi::DebugUi(const VulkanContext& context, const Window& window, VkRenderPas
     initInfo.ImageCount = imageCount;
 
     // Rendering through a classic render pass, which the UI shares with the
-    // triangle, instead of the dynamic rendering path.
+    // mesh, instead of the dynamic rendering path.
     initInfo.PipelineInfoMain = makePipelineInfo(renderPass_);
     initInfo.UseDynamicRendering = false;
     initInfo.PipelineCache = VK_NULL_HANDLE;
@@ -199,7 +199,7 @@ void DebugUi::drawAboutWindow() {
         ImGui::Separator();
         ImGui::Text("Dear ImGui %s", IMGUI_VERSION);
         ImGui::TextWrapped(
-            "The UI shares the triangle's render pass, so it is recorded into the same "
+            "The UI shares the mesh's render pass, so it is recorded into the same "
             "command buffer.");
     }
     ImGui::End();

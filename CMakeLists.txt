@@ -170,6 +170,8 @@ add_executable(vk_triangle
     src/core/Window.cpp
     src/vk/VulkanContext.cpp
     src/vk/Swapchain.cpp
+    src/vk/Material.cpp
+    src/vk/Mesh.cpp
     src/vk/GraphicsPipeline.cpp
     src/vk/DebugUi.cpp
     src/vk/Renderer.cpp)

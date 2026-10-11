@@ -9,7 +9,7 @@ class Window;
 
 /// Values the debug UI is allowed to change while the renderer is running.
 struct RendererSettings {
-    /// Spin speed of the triangle, in radians per second.
+    /// Spin speed of the mesh, in radians per second.
     float rotationSpeed = 0.75f;
     /// Pauses the spin without stopping the render loop.
     bool rotate = true;

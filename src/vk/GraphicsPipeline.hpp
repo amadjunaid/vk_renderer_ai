@@ -6,6 +6,7 @@
 #include <vector>
 
 class VulkanContext;
+class Material;
 
 /// Push constant block shared with shaders/triangle.vert.
 ///
@@ -17,14 +18,18 @@ struct TrianglePushConstants {
     float angle = 0.0f;  // rotation around the origin, in radians
 };
 
-/// The render pass and the single graphics pipeline that draws the triangle.
+/// The render pass and the single graphics pipeline that draws the mesh.
 ///
 /// Viewport and scissor are declared as dynamic state, so resizing the window
 /// does not require rebuilding the pipeline - only a change of the swapchain
 /// image format does.
+///
+/// The pipeline is built from one material and keeps only a reference to it, so
+/// the material has to outlive the pipeline. The vertex layout comes from Vertex
+/// (see vk/Mesh.hpp), which the pipeline declares for the mesh that it draws.
 class GraphicsPipeline {
 public:
-    GraphicsPipeline(const VulkanContext& context, VkFormat colorFormat, const std::string& shaderDir);
+    GraphicsPipeline(const VulkanContext& context, VkFormat colorFormat, const Material& material);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;
@@ -32,7 +37,7 @@ public:
 
     /// Rebuilds the pipeline for a new swapchain color format. A no-op when the
     /// format did not change.
-    void recreate(VkFormat colorFormat, const std::string& shaderDir);
+    void recreate(VkFormat colorFormat);
 
     VkRenderPass renderPass() const { return renderPass_; }
     VkPipelineLayout layout() const { return layout_; }
@@ -40,13 +45,14 @@ public:
 
 private:
     void createRenderPass();
-    void createPipeline(const std::string& shaderDir);
+    void createPipeline();
     void destroy();
 
     static VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code);
     static std::vector<char> readFile(const std::string& path);
 
     const VulkanContext& context_;
+    const Material& material_;
 
     VkFormat colorFormat_ = VK_FORMAT_UNDEFINED;
     VkRenderPass renderPass_ = VK_NULL_HANDLE;

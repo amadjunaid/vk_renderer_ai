@@ -3,6 +3,8 @@
 #include "core/Window.hpp"
 #include "vk/DebugUi.hpp"
 #include "vk/GraphicsPipeline.hpp"
+#include "vk/Material.hpp"
+#include "vk/Mesh.hpp"
 #include "vk/Swapchain.hpp"
 #include "vk/VulkanContext.hpp"
 #include "vk/VkCheck.hpp"
@@ -14,13 +16,38 @@ namespace {
 
 constexpr float kTwoPi = 6.28318530718f;
 
+/// The demo mesh: three corners in NDC, one colour each, in the order the vertex
+/// shader used to generate them from gl_VertexIndex. The data lives here rather
+/// than in Mesh so that Mesh stays a container for whatever it is handed - a
+/// mesh loaded from a file fills these same two vectors instead. The layout has
+/// to match Vertex in vk/Mesh.hpp.
+const std::vector<Vertex> kMeshVertices = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+};
+const std::vector<std::uint32_t> kMeshIndices = {0, 1, 2};
+
+/// The demo material: the shader pair the mesh is drawn with, named after the
+/// shape those shaders draw. Only the file names are fixed here, because the
+/// directory holding the compiled SPIR-V is only known at run time (the build
+/// passes it in). Like the mesh data, this sits here so that Material stays a
+/// description of a single shader pair rather than a catalogue of them.
+constexpr const char* kMaterialName = "triangle";
+constexpr const char* kMaterialVertexShader = "triangle.vert.spv";
+constexpr const char* kMaterialFragmentShader = "triangle.frag.spv";
+
 }  // namespace
 
 Renderer::Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
                    bool enableDebugUi)
-    : context_(context), window_(window), shaderDir_(shaderDir) {
+    : context_(context), window_(window) {
     swapchain_ = std::make_unique<Swapchain>(context_, window_);
-    pipeline_ = std::make_unique<GraphicsPipeline>(context_, swapchain_->imageFormat(), shaderDir_);
+
+    material_ = std::make_unique<Material>(kMaterialName, shaderDir + "/" + kMaterialVertexShader,
+                                           shaderDir + "/" + kMaterialFragmentShader);
+    mesh_ = std::make_unique<Mesh>(context_, kMeshVertices, kMeshIndices, *material_);
+    pipeline_ = std::make_unique<GraphicsPipeline>(context_, swapchain_->imageFormat(), *material_);
 
     if (enableDebugUi) {
         // Created after the pipeline because the UI renders into the pipeline's
@@ -54,9 +81,10 @@ Renderer::~Renderer() {
         commandPool_ = VK_NULL_HANDLE;
     }
 
-    // pipeline_, swapchain_ and debugUi_ release their own Vulkan objects. They
-    // are destroyed after this body, in reverse declaration order, so the UI is
-    // gone before the render pass it draws into.
+    // pipeline_, mesh_, material_, swapchain_ and debugUi_ release their own
+    // Vulkan objects. They are destroyed after this body, in reverse declaration
+    // order, so the mesh goes before the material it borrowed and the UI before
+    // the render pass it draws into.
 }
 
 void Renderer::run() {
@@ -227,7 +255,7 @@ void Renderer::recreateSwapchain() {
     destroyFramebuffers();
 
     swapchain_->recreate(window_);
-    pipeline_->recreate(swapchain_->imageFormat(), shaderDir_);
+    pipeline_->recreate(swapchain_->imageFormat());
 
     if (debugUi_) {
         // The UI pipeline is compiled against the render pass, which
@@ -290,8 +318,9 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
     scissor.extent = extent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    // Three vertices, no vertex buffer, no indices.
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    // The mesh binds its own vertex and index buffers and issues the indexed
+    // draw, so this is all the geometry the pipeline needs to see.
+    mesh_->draw(commandBuffer);
 
     // ImGui shares this render pass, so it has to be recorded before the pass
     // ends. Note it needs no framebuffers of its own - the backend draws into

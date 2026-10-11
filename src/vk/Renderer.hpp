@@ -13,13 +13,17 @@ class VulkanContext;
 class Window;
 class Swapchain;
 class GraphicsPipeline;
+class Material;
+class Mesh;
 
-/// Owns everything that is needed to present frames: framebuffers, the command
-/// pool and buffers, and the frame synchronisation objects.
+/// Owns everything that is needed to present frames: the mesh and its material,
+/// the framebuffers, the command pool and buffers, and the frame synchronisation
+/// objects.
 class Renderer {
 public:
-    /// enableDebugUi adds the ImGui menu bar and toolbar. With it disabled the
-    /// frame path stays a pure triangle render.
+    /// shaderDir is where the build put the compiled SPIR-V. enableDebugUi adds
+    /// the ImGui menu bar and toolbar; with it disabled the frame path stays a
+    /// pure mesh render.
     Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
              bool enableDebugUi = true);
     ~Renderer();
@@ -53,12 +57,18 @@ private:
 
     const VulkanContext& context_;
     const Window& window_;
-    std::string shaderDir_;
 
     /// Editable at runtime from the toolbar.
     RendererSettings settings_;
 
     std::unique_ptr<Swapchain> swapchain_;
+
+    /// The mesh only borrows its material, so this has to be declared - and so
+    /// destroyed - before it.
+    std::unique_ptr<Material> material_;
+    std::unique_ptr<Mesh> mesh_;
+
+    /// Declared after material_, whose shaders it was built from.
     std::unique_ptr<GraphicsPipeline> pipeline_;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;

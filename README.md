@@ -19,12 +19,17 @@ that will have to be torn out later.
 - Builds a swapchain, image views and framebuffers, and recreates them on window resize
   or minimize/restore.
 - Compiles GLSL to SPIR-V at build time and creates a graphics pipeline from it.
+- Renders a `Mesh`: vertices and indices uploaded once into device-local buffers
+  through a staging buffer, bound and drawn with `vkCmdDrawIndexed`. The demo mesh is
+  a generated triangle whose data sits in `Renderer.cpp`; loading one from a file is a
+  matter of filling the same two vectors.
+- Draws the mesh through a `Material`, which for now is the shader pair the mesh is
+  drawn with. No descriptor sets are involved yet.
 - Renders with 2 frames in flight, using per-frame fences, per-image present semaphores
   and per-image command buffers.
-- Triangles are generated in the vertex shader, so no vertex buffer or descriptor sets
-  are involved yet. The rotation is a push constant, and the vertex shader turns that
-  angle into a 2D rotation matrix.
-- Draws a Dear ImGui menu bar and toolbar into the same render pass as the triangle, so
+- Rotates the mesh from a push constant, which the vertex shader turns into a 2D
+  rotation matrix.
+- Draws a Dear ImGui menu bar and toolbar into the same render pass as the mesh, so
   the UI needs no render pass, framebuffers or descriptor sets of its own. The toolbar
   drives the rotation speed at runtime.
 
@@ -118,7 +123,7 @@ cmake -S . -B build -DGLSL_COMPILER="C:/VulkanSDK/1.4.363.0/Bin/glslc.exe"
 ### Verifying the output
 
 `tools/capture_window.ps1` screenshots the running window and samples a few known pixel
-positions, which is handy after changing the triangle or the clear color:
+positions, which is handy after changing the mesh or the clear color:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/capture_window.ps1 -Out build/verify.png
@@ -150,7 +155,7 @@ shared because `--config` is ignored by single-config generators.
 ```
 CMakeLists.txt              build: fetches GLFW + Dear ImGui, finds Vulkan + glslc
 shaders/
-  triangle.vert             positions/colors from gl_VertexIndex, rotated by a push constant
+  triangle.vert             rotates the mesh's vertex positions/colors by a push constant
   triangle.frag             passes the interpolated color through
 src/
   main.cpp                  creates the window, context and renderer, then runs it
@@ -158,17 +163,30 @@ src/
   vk/VkCheck.hpp            VK_CHECK macro and VkResult -> string helper
   vk/VulkanContext.hpp/.cpp instance, debug messenger, surface, device, queues
   vk/Swapchain.hpp/.cpp     swapchain, image views, format/present-mode/extent selection
-  vk/GraphicsPipeline.hpp/.cpp  render pass and the triangle pipeline
+  vk/Material.hpp/.cpp      the shaders a mesh is drawn with
+  vk/Mesh.hpp/.cpp          Vertex layout, mesh buffers, indexed draw
+  vk/GraphicsPipeline.hpp/.cpp  render pass and the mesh pipeline (built from a Material)
   vk/DebugUi.hpp/.cpp       ImGui menu bar and toolbar, sharing the render pass
-  vk/Renderer.hpp/.cpp      framebuffers, command pool/buffers, sync, the frame loop
+  vk/Renderer.hpp/.cpp      the demo mesh's data, framebuffers, sync, the frame loop
 tools/
   capture_window.ps1        screenshots the running window and samples pixels
 ```
 
-Ownership flows one way: `Renderer` owns `Swapchain` and `GraphicsPipeline`, both of
-which only borrow the shared `VulkanContext`. Framebuffers live in `Renderer` because
-they reference *both* a swapchain image and the render pass, which is why a resize
-rebuilds them in the middle of the swapchain/pipeline recreation.
+Ownership flows one way: `Renderer` owns a `Material`, a `Mesh` and a `Swapchain`, and
+the `GraphicsPipeline` built from the material. Everything only borrows the shared
+`VulkanContext`. The mesh and the pipeline only *reference* the material, so `Renderer`
+declares it first and destroys it last. Framebuffers live in `Renderer` because they
+reference *both* a swapchain image and the render pass, which is why a resize rebuilds
+them in the middle of the swapchain/pipeline recreation.
+
+`Mesh` owns the vertex and index buffers, so both the vertex layout (`Vertex`) and the
+buffers come from one place - the pipeline just declares the layout it was given, which
+is why `GraphicsPipeline` uses `Vertex` from `vk/Mesh.hpp`.
+
+`Mesh` holds no geometry of its own: the demo triangle is the `kMeshVertices` /
+`kMeshIndices` constant pair in `Renderer.cpp`, and the constructor uploads whatever it
+is handed. Likewise `Material` knows nothing about the demo: Renderer names the shader
+files (`kMaterial*`) and hands it the full paths.
 
 ## Frame loop
 
@@ -179,8 +197,9 @@ Each iteration of `Renderer::drawFrame()`:
 3. Waits on the fence of the frame that last used that image, so the CPU never writes
    a command buffer that is still executing.
 4. Records the command buffer: begin render pass, bind pipeline, push the rotation
-   angle, set the dynamic viewport and scissor, `vkCmdDraw(3, 1, 0, 0)`, record the
-   ImGui draw data into that same pass, end render pass.
+   angle, set the dynamic viewport and scissor, bind the mesh's vertex and index
+   buffers and `vkCmdDrawIndexed` the whole mesh, record the ImGui draw data into
+   that same pass, end render pass.
 5. Submits, waiting on `imageAvailable` and signalling `renderFinished`.
 6. Presents, and rebuilds the swapchain if the surface went out of date or suboptimal
    (`VK_ERROR_OUT_OF_DATE_KHR`, `VK_SUBOPTIMAL_KHR`) or the window was resized.
@@ -198,7 +217,7 @@ render pass `GraphicsPipeline` already created** rather than owning one:
   calls `vkCmdBeginRenderPass` from the `ImGui_ImplVulkanH_*` helpers, which this project
   does not use.
 - So the UI needs no render pass, no framebuffers and no image views of its own. There is
-  nothing to rebuild on a resize, and the triangle and the UI are one pass over one image.
+  nothing to rebuild on a resize, and the mesh and the UI are one pass over one image.
 - The render pass is handed over through
   `ImGui_ImplVulkan_InitInfo::PipelineInfoMain.RenderPass` (the older top-level
   `RenderPass` field was replaced in this release). When the swapchain format changes,
@@ -211,15 +230,18 @@ render pass `GraphicsPipeline` already created** rather than owning one:
 Note that Dear ImGui 1.92 uploads its font atlas lazily through the renderer texture
 system (`ImGuiBackendFlags_RendererHasTextures`), so there is no `CreateFontsTexture()`
 call — that function no longer exists. Pass `false` as the last `Renderer` argument to
-render the bare triangle with no UI at all.
+render the bare mesh with no UI at all.
 
 ## Next steps
 
-- Vertex and index buffers with a staging-buffer upload path.
+- Loading a mesh from a file (OBJ or glTF) to replace the generated triangle in
+  `Renderer.cpp`, plus the per-vertex normals and UVs that a real mesh needs.
 - Aspect-correct projection: the shader rotates in NDC, where x and y map to
-  different pixel scales at 16:9, so the triangle stretches slightly as it spins.
+  different pixel scales at 16:9, so the mesh stretches slightly as it spins.
   Fixing it means scaling x by the aspect ratio (and pushing that ratio in).
 - Depth buffering (a depth attachment plus `VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL`).
+- Moving pipeline state and textures into `Material`, which is what turns it from a
+  shader pair into a real material.
 - Uniform buffers and descriptor sets, then a per-frame camera.
 - MSAA, and a fullscreen-triangle post-processing pass.
 - Move to `VK_KHR_dynamic_rendering` to drop the render pass and framebuffers entirely.
