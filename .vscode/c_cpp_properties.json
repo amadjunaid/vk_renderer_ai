@@ -22,6 +22,36 @@
             "cStandard": "c17",
             "cppStandard": "c++20",
             "intelliSenseMode": "windows-msvc-x64"
+        },
+        {
+            // The C/C++ extension picks the configuration whose name matches the
+            // host, so these are selected automatically off Windows.
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/build/_deps/glfw-src/include"
+            ],
+            "defines": [],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            // Ninja and Makefile builds export this (CMAKE_EXPORT_COMPILE_COMMANDS),
+            // so the Vulkan include path comes from the build rather than being
+            // spelled out here.
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json"
+        },
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/build/_deps/glfw-src/include"
+            ],
+            "defines": [],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            // Use macos-clang-x64 instead on an Intel Mac.
+            "intelliSenseMode": "macos-clang-arm64",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json"
         }
     ]
 }

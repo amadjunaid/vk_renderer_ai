@@ -21,6 +21,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
+# Lets the C/C++ extension resolve includes from the real compile flags, so the
+# editor config does not need hand-written platform-specific include paths.
+# Honoured by the Ninja and Makefile generators (what Linux and macOS use);
+# silently ignored by the Visual Studio generator.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------

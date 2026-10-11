@@ -3,7 +3,9 @@
 /out/
 [Bb]uild/
 cmake-build-*/
-/build-glslang/
+# Scratch build trees kept out of the main build dir, e.g. build-glslang/ when
+# testing the glslangValidator fallback path.
+/build-*/
 
 # CMake
 CMakeCache.txt
