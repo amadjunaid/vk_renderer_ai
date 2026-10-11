@@ -1,0 +1,24 @@
+{
+    // F5 builds the Debug configuration and launches it under the MSVC debugger.
+    // "cppvsdbg" comes from the C/C++ extension (ms-vscode.cpptools) and is the
+    // debugger that understands MSVC debug information (PDB).
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (MSVC)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/vk_triangle.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            // integratedTerminal keeps the renderer's stdout/stderr - the GPU
+            // banner and any VK_LAYER_KHRONOS_validation messages - visible next
+            // to the debug controls.
+            "console": "integratedTerminal",
+            // CMake bakes the absolute path of the compiled SPIR-V into the
+            // binary, so cwd does not affect shader loading.
+            "preLaunchTask": "cmake: build Debug"
+        }
+    ]
+}
