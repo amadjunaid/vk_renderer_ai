@@ -1,4 +1,4 @@
-# deepseek_vk_renderer
+# vk_renderer_ai
 
 A minimal Vulkan renderer in C++20 that opens a window and draws a single triangle.
 The goal of this first milestone is a clean, correct render loop with no abstractions
