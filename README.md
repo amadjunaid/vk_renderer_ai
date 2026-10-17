@@ -1,4 +1,4 @@
-# deepseek_vk_renderer
+# vk_renderer_ai
 
 A minimal Vulkan renderer in C++20 that opens a window, imports a binary glTF
 (`.glb`) mesh and draws it with a physically based material.
