@@ -140,8 +140,8 @@ message(STATUS "shader compiler: ${GLSL_COMPILER} ${GLSL_COMPILER_ARGS}")
 
 set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mesh.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mesh.frag)
 
 set(SHADER_SPIRV "")
 foreach(shader ${SHADER_SOURCES})
@@ -167,23 +167,37 @@ add_custom_target(vk_shaders DEPENDS ${SHADER_SPIRV})
 
 add_executable(vk_triangle
     src/main.cpp
+    src/core/FileDialog.cpp
     src/core/Window.cpp
+    src/io/Json.cpp
+    src/io/MeshLoader.cpp
+    src/vk/Buffer.cpp
     src/vk/VulkanContext.cpp
     src/vk/Swapchain.cpp
     src/vk/Material.cpp
     src/vk/Mesh.cpp
     src/vk/GraphicsPipeline.cpp
+    src/vk/SceneUniformBuffer.cpp
     src/vk/DebugUi.cpp
     src/vk/Renderer.cpp)
 
 target_include_directories(vk_triangle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# The renderer loads its SPIR-V from this directory, so the working directory
-# does not matter when launching the executable.
+# Where the renderer looks for the model it loads at start-up. A cache variable
+# so it can be pointed somewhere else - a build directory full of test assets,
+# say - without editing this file.
+set(VK_RENDERER_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data"
+    CACHE PATH "Directory holding the model the renderer loads at start-up")
+
+# The renderer loads its SPIR-V and its default model from these directories, so
+# the working directory does not matter when launching the executable.
 target_compile_definitions(vk_triangle PRIVATE SHADER_DIR="${SHADER_OUTPUT_DIR}")
+target_compile_definitions(vk_triangle PRIVATE DATA_DIR="${VK_RENDERER_DATA_DIR}")
 
 if(WIN32)
     target_compile_definitions(vk_triangle PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    # The mesh import opens a native file dialog through GetOpenFileName.
+    target_link_libraries(vk_triangle PRIVATE comdlg32)
 endif()
 
 target_link_libraries(vk_triangle PRIVATE glfw Vulkan::Vulkan imgui)

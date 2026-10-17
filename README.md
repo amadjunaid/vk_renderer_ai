@@ -1,10 +1,9 @@
 # deepseek_vk_renderer
 
-A minimal Vulkan renderer in C++20 that opens a window and draws a single triangle.
-The goal of this first milestone is a clean, correct render loop with no abstractions
-that will have to be torn out later.
+A minimal Vulkan renderer in C++20 that opens a window, imports a binary glTF
+(`.glb`) mesh and draws it with a physically based material.
 
-![status](https://img.shields.io/badge/status-triangle-blue)
+![status](https://img.shields.io/badge/status-glTF%20import-blue)
 
 ## What it does today
 
@@ -19,19 +18,30 @@ that will have to be torn out later.
 - Builds a swapchain, image views and framebuffers, and recreates them on window resize
   or minimize/restore.
 - Compiles GLSL to SPIR-V at build time and creates a graphics pipeline from it.
+- Imports meshes from binary glTF files, with a hand-written reader (`glb` container plus a
+  small JSON parser) rather than a dependency. Positions, normals and texture coordinates
+  are read from any accessor layout glTF allows - interleaved or not, `uint8`/`uint16`/
+  `uint32` indices, normalized integer attributes - node transforms are baked in during a
+  walk of the scene graph, and normals are generated for primitives that lack them. The
+  data is rotated into the renderer's world on the way in (see *Coordinate system*).
 - Renders a `Mesh`: vertices and indices uploaded once into device-local buffers
-  through a staging buffer, bound and drawn with `vkCmdDrawIndexed`. The demo mesh is
-  a generated triangle whose data sits in `Renderer.cpp`; loading one from a file is a
-  matter of filling the same two vectors.
-- Draws the mesh through a `Material`, which for now is the shader pair the mesh is
-  drawn with. No descriptor sets are involved yet.
+  through a staging buffer, bound and drawn with `vkCmdDrawIndexed`.
+- Draws the mesh through a `Material` - a shader pair plus the PBR factors of glTF's
+  `pbrMetallicRoughness` model, which is what an imported file fills in.
+- Shades with a basic Cook-Torrance PBR fragment shader (GGX, Smith, Schlick) lit by one
+  directional light plus an ambient fill, honouring `baseColorFactor`, `metallicFactor`,
+  `roughnessFactor` and `emissiveFactor`.
+- Depth tests against a depth attachment, so a solid mesh hides its own far side.
+- Passes the per-frame matrices, camera position and light through a uniform buffer and a
+  descriptor set, and the per-material factors through a push constant.
 - Renders with 2 frames in flight, using per-frame fences, per-image present semaphores
   and per-image command buffers.
-- Rotates the mesh from a push constant, which the vertex shader turns into a 2D
-  rotation matrix.
-- Draws a Dear ImGui menu bar and toolbar into the same render pass as the mesh, so
-  the UI needs no render pass, framebuffers or descriptor sets of its own. The toolbar
-  drives the rotation speed at runtime.
+- Spins the mesh and orbits a perspective camera, both editable at runtime.
+- Draws a Dear ImGui menu bar, toolbar and model window into the same render pass as the
+  mesh, so the UI needs no render pass, framebuffers or descriptor sets of its own. The
+  model window shows what was imported and edits the material and camera live.
+- Imports another mesh at run time from **File > Import > Mesh...**, which opens the
+  platform's native file dialog.
 
 ## Requirements
 
@@ -155,38 +165,81 @@ shared because `--config` is ignored by single-config generators.
 ```
 CMakeLists.txt              build: fetches GLFW + Dear ImGui, finds Vulkan + glslc
 shaders/
-  triangle.vert             rotates the mesh's vertex positions/colors by a push constant
-  triangle.frag             passes the interpolated color through
+  mesh.vert                 vertex transform, hands world position/normal to the fragment stage
+  mesh.frag                 Cook-Torrance PBR shading from the material's glTF factors
+data/
+  cube.glb                  the model loaded at start-up
 src/
   main.cpp                  creates the window, context and renderer, then runs it
-  core/Window.hpp/.cpp      GLFW lifetime, resize flag, VkSurfaceKHR creation
+  core/Math.hpp             Vec3/Mat4, the perspective and lookAt matrices
+  core/Window.hpp/.cpp      GLFW lifetime, resize flag, VkSurfaceKHR, native handle
+  core/FileDialog.hpp/.cpp  the native open-file dialog (Windows; nullopt elsewhere)
+  io/Json.hpp/.cpp          a minimal JSON reader, for the glTF JSON chunk
+  io/MeshLoader.hpp/.cpp    the .glb reader plus the built-in fallback cube
   vk/VkCheck.hpp            VK_CHECK macro and VkResult -> string helper
   vk/VulkanContext.hpp/.cpp instance, debug messenger, surface, device, queues
   vk/Swapchain.hpp/.cpp     swapchain, image views, format/present-mode/extent selection
-  vk/Material.hpp/.cpp      the shaders a mesh is drawn with
+  vk/Buffer.hpp/.cpp        buffer + memory creation and memory-type selection
+  vk/Material.hpp/.cpp      the shaders a mesh is drawn with, plus its PBR factors
   vk/Mesh.hpp/.cpp          Vertex layout, mesh buffers, indexed draw
-  vk/GraphicsPipeline.hpp/.cpp  render pass and the mesh pipeline (built from a Material)
-  vk/DebugUi.hpp/.cpp       ImGui menu bar and toolbar, sharing the render pass
-  vk/Renderer.hpp/.cpp      the demo mesh's data, framebuffers, sync, the frame loop
+  vk/GraphicsPipeline.hpp/.cpp  render pass (color + depth), descriptor set layout,
+                            pipeline layout and the mesh pipeline
+  vk/SceneUniformBuffer.hpp/.cpp  the per-frame uniform buffer and its descriptor sets
+  vk/DebugUi.hpp/.cpp       ImGui menu bar, toolbar, model window; shares the render pass
+  vk/Renderer.hpp/.cpp      the mesh, depth attachment, framebuffers, sync, the frame loop
 tools/
   capture_window.ps1        screenshots the running window and samples pixels
 ```
 
-Ownership flows one way: `Renderer` owns a `Material`, a `Mesh` and a `Swapchain`, and
-the `GraphicsPipeline` built from the material. Everything only borrows the shared
-`VulkanContext`. The mesh and the pipeline only *reference* the material, so `Renderer`
-declares it first and destroys it last. Framebuffers live in `Renderer` because they
-reference *both* a swapchain image and the render pass, which is why a resize rebuilds
-them in the middle of the swapchain/pipeline recreation.
+Ownership flows one way: `Renderer` owns a `Material`, a `Mesh`, a `Swapchain`, the
+`SceneUniformBuffer` and the `GraphicsPipeline` built from the material. Everything only
+borrows the shared `VulkanContext`. The mesh and the pipeline only *reference* the
+material, so `Renderer` declares it first and destroys it last. The uniform buffer is
+declared after the pipeline, because its descriptor sets are allocated from the
+pipeline's descriptor set layout - and that is also the order the spec wants at
+teardown: the descriptor sets are released before the layout they came from.
+Framebuffers live in `Renderer` because they reference *both* a swapchain image and the
+render pass, which is why a resize rebuilds them in the middle of the
+swapchain/pipeline recreation. The depth attachment is rebuilt with them, since its size
+has to follow the swapchain extent.
+
+`Mesh` holds no geometry of its own. `io/MeshLoader.cpp` produces a `MeshData` from a
+file - or a built-in cube when the file is missing - and `Renderer::applyMeshData` hands
+its vectors to `Mesh`, its material to `Material` and its bounds to the camera framing.
+Importing at run time is the same call with another path, so a file loaded from the menu
+and the one loaded at start-up cannot drift apart.
 
 `Mesh` owns the vertex and index buffers, so both the vertex layout (`Vertex`) and the
 buffers come from one place - the pipeline just declares the layout it was given, which
-is why `GraphicsPipeline` uses `Vertex` from `vk/Mesh.hpp`.
+is why `GraphicsPipeline` uses `Vertex` from `vk/Mesh.hpp`. `Vertex` is the three
+attributes glTF calls POSITION, NORMAL and TEXCOORD_0, so a loader fills the struct
+directly.
 
-`Mesh` holds no geometry of its own: the demo triangle is the `kMeshVertices` /
-`kMeshIndices` constant pair in `Renderer.cpp`, and the constructor uploads whatever it
-is handed. Likewise `Material` knows nothing about the demo: Renderer names the shader
-files (`kMaterial*`) and hands it the full paths.
+## Coordinate system
+
+The renderer's world is right-handed with **+Z up and -X forward**, and everything follows
+from that: the camera orbits the origin with +Z as its up vector, the toolbar's spin is a
+rotation about +Z, the directional light comes mostly from +Z, and the ambient term in the
+fragment shader weighs the normal's Z component.
+
+glTF is +Y up, and its spec says the front of an asset faces +Z, so
+`io/MeshLoader.cpp` rotates every imported file into the renderer's convention with
+`worldConventionTransform()`:
+
+| glTF | world |
+| --- | --- |
+| +Y (up) | +Z (up) |
+| +Z (the front of the asset) | -X (forward) |
+| +X | -Y |
+
+The third row follows from the first two: a rotation that is right-handed can only send
++Z to -X one way. It is a rotation and not a reflection, so face winding is unchanged.
+
+The conversion is prepended as the root of the scene-graph walk, so it flows through the
+same matrix as the node transforms - the normal matrix and the bounds pick it up with
+nothing extra to keep in sync. `MeshData` is always handed to the renderer in the world
+convention, which makes adding a format that uses another convention (OBJ, FBX) a matter
+of writing the same conversion, and is why `makeCubeMesh` is authored in it directly.
 
 ## Frame loop
 
@@ -196,12 +249,14 @@ Each iteration of `Renderer::drawFrame()`:
 2. Acquires the next swapchain image with `vkAcquireNextImageKHR`.
 3. Waits on the fence of the frame that last used that image, so the CPU never writes
    a command buffer that is still executing.
-4. Records the command buffer: begin render pass, bind pipeline, push the rotation
-   angle, set the dynamic viewport and scissor, bind the mesh's vertex and index
-   buffers and `vkCmdDrawIndexed` the whole mesh, record the ImGui draw data into
-   that same pass, end render pass.
-5. Submits, waiting on `imageAvailable` and signalling `renderFinished`.
-6. Presents, and rebuilds the swapchain if the surface went out of date or suboptimal
+4. Writes this frame's `SceneUniforms` into the slice of the uniform buffer that belongs
+   to the current frame slot.
+5. Records the command buffer: begin render pass (clearing color and depth), bind the
+   pipeline, bind the scene descriptor set, push the material constants, set the dynamic
+   viewport and scissor, bind the mesh's vertex and index buffers and `vkCmdDrawIndexed`
+   the whole mesh, record the ImGui draw data into that same pass, end render pass.
+6. Submits, waiting on `imageAvailable` and signalling `renderFinished`.
+7. Presents, and rebuilds the swapchain if the surface went out of date or suboptimal
    (`VK_ERROR_OUT_OF_DATE_KHR`, `VK_SUBOPTIMAL_KHR`) or the window was resized.
 
 Viewport and scissor are dynamic state, so a resize never invalidates the pipeline.
@@ -232,16 +287,30 @@ system (`ImGuiBackendFlags_RendererHasTextures`), so there is no `CreateFontsTex
 call — that function no longer exists. Pass `false` as the last `Renderer` argument to
 render the bare mesh with no UI at all.
 
+The render pass the UI shares has two attachments (color and depth). The backend only
+uses the color one; it is created against the render pass, so it stays compatible.
+
+**Importing a mesh.** `File > Import > Mesh...` asks `core/FileDialog` for a path and
+hands it to `Renderer::importMesh`, which runs inside the frame - the load is fast enough
+for the one-frame hitch to be invisible. A failed import leaves the current mesh on
+screen and reports the error in red in the model window, because losing the mesh you are
+looking at is a worse outcome than the message. On Windows the dialog is
+`GetOpenFileNameW` (hence the `comdlg32` link); elsewhere `filedialog::available()`
+returns false and the model window shows a path box the same menu item reads instead.
+
 ## Next steps
 
-- Loading a mesh from a file (OBJ or glTF) to replace the generated triangle in
-  `Renderer.cpp`, plus the per-vertex normals and UVs that a real mesh needs.
-- Aspect-correct projection: the shader rotates in NDC, where x and y map to
-  different pixel scales at 16:9, so the mesh stretches slightly as it spins.
-  Fixing it means scaling x by the aspect ratio (and pushing that ratio in).
-- Depth buffering (a depth attachment plus `VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL`).
-- Moving pipeline state and textures into `Material`, which is what turns it from a
-  shader pair into a real material.
-- Uniform buffers and descriptor sets, then a per-frame camera.
+- Textures: `baseColorTexture` and friends need image decoding, samplers and a
+  descriptor set, which is also what turns `Material` from a shader pair into a real
+  material.
+- Tangents and a normal map, so a glTF file's `normalTexture` can be used.
+- Alpha modes: `Material` carries no blending state, so `MASK` and `BLEND` materials
+  render as opaque.
+- Back-face culling driven by the material's `doubleSided` flag, which needs the winding
+  order (Vulkan's flipped Y reverses it) settled first.
+- Image based lighting to replace the constant ambient fill, and a shadow map for the
+  directional light.
+- A scene rather than a single mesh: several `Mesh` instances, several materials, and a
+  per-object uniform (or push constant) instead of one model matrix.
 - MSAA, and a fullscreen-triangle post-processing pass.
 - Move to `VK_KHR_dynamic_rendering` to drop the render pass and framebuffers entirely.

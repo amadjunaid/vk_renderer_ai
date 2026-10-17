@@ -1,5 +1,6 @@
 #include "vk/Mesh.hpp"
 
+#include "vk/Buffer.hpp"
 #include "vk/VkCheck.hpp"
 #include "vk/VulkanContext.hpp"
 
@@ -8,70 +9,6 @@
 #include <stdexcept>
 
 namespace {
-
-/// A buffer and the memory backing it. They are always created and destroyed
-/// together, so they travel as one value.
-struct Buffer {
-    VkBuffer handle = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-};
-
-std::uint32_t findMemoryType(const VulkanContext& context, std::uint32_t typeFilter,
-                             VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memoryProperties{};
-    vkGetPhysicalDeviceMemoryProperties(context.physicalDevice(), &memoryProperties);
-
-    for (std::uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
-        const bool typeAllowed = (typeFilter & (1u << i)) != 0;
-        const bool hasProperties =
-            (memoryProperties.memoryTypes[i].propertyFlags & properties) == properties;
-        if (typeAllowed && hasProperties) {
-            return i;
-        }
-    }
-
-    throw std::runtime_error("No Vulkan memory type satisfies the requested properties");
-}
-
-Buffer createBuffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFlags usage,
-                    VkMemoryPropertyFlags properties) {
-    const VkDevice device = context.device();
-
-    Buffer buffer;
-
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = size;
-    bufferInfo.usage = usage;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;  // only the graphics queue touches it
-    VK_CHECK(vkCreateBuffer(device, &bufferInfo, nullptr, &buffer.handle));
-
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, buffer.handle, &requirements);
-
-    VkMemoryAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.allocationSize = requirements.size;
-    allocateInfo.memoryTypeIndex = findMemoryType(context, requirements.memoryTypeBits, properties);
-    VK_CHECK(vkAllocateMemory(device, &allocateInfo, nullptr, &buffer.memory));
-
-    VK_CHECK(vkBindBufferMemory(device, buffer.handle, buffer.memory, 0));
-
-    return buffer;
-}
-
-void destroyBuffer(const VulkanContext& context, Buffer& buffer) {
-    const VkDevice device = context.device();
-
-    if (buffer.handle != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, buffer.handle, nullptr);
-    }
-    if (buffer.memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, buffer.memory, nullptr);
-    }
-
-    buffer = {};
-}
 
 /// Copies `size` bytes between two buffers on the graphics queue and makes the
 /// write visible to the vertex input stage. The command pool is created and
@@ -174,18 +111,23 @@ VkVertexInputBindingDescription Vertex::bindingDescription() {
     return binding;
 }
 
-std::array<VkVertexInputAttributeDescription, 2> Vertex::attributeDescriptions() {
-    std::array<VkVertexInputAttributeDescription, 2> attributes{};
+std::array<VkVertexInputAttributeDescription, 3> Vertex::attributeDescriptions() {
+    std::array<VkVertexInputAttributeDescription, 3> attributes{};
 
     attributes[0].location = 0;
     attributes[0].binding = 0;
-    attributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[0].offset = offsetof(Vertex, position);
 
     attributes[1].location = 1;
     attributes[1].binding = 0;
     attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].offset = offsetof(Vertex, color);
+    attributes[1].offset = offsetof(Vertex, normal);
+
+    attributes[2].location = 2;
+    attributes[2].binding = 0;
+    attributes[2].format = VK_FORMAT_R32G32_SFLOAT;
+    attributes[2].offset = offsetof(Vertex, uv);
 
     return attributes;
 }

@@ -15,17 +15,22 @@ class Swapchain;
 class GraphicsPipeline;
 class Material;
 class Mesh;
+class SceneUniformBuffer;
+
+/// The CPU-side mesh description an importer produces (see io/MeshLoader.hpp).
+struct MeshData;
 
 /// Owns everything that is needed to present frames: the mesh and its material,
-/// the framebuffers, the command pool and buffers, and the frame synchronisation
-/// objects.
+/// the depth buffer, the framebuffers, the command pool and buffers, the
+/// per-frame uniforms and the frame synchronisation objects.
 class Renderer {
 public:
-    /// shaderDir is where the build put the compiled SPIR-V. enableDebugUi adds
-    /// the ImGui menu bar and toolbar; with it disabled the frame path stays a
-    /// pure mesh render.
+    /// shaderDir is where the build put the compiled SPIR-V and dataDir where
+    /// the model files live; both are absolute, so the working directory does
+    /// not matter. enableDebugUi adds the ImGui menu bar, toolbar and model
+    /// window; with it disabled the frame path stays a pure mesh render.
     Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
-             bool enableDebugUi = true);
+             const std::string& dataDir, bool enableDebugUi = true);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -38,11 +43,17 @@ private:
     /// Frames the CPU may prepare while the GPU is still working on earlier ones.
     static constexpr std::uint32_t kMaxFramesInFlight = 2;
 
+    /// The model loaded at startup, relative to the data directory. A missing
+    /// file is not fatal: the renderer falls back to makeCubeMesh().
+    static constexpr const char* kDefaultModelFile = "cube.glb";
+
     void drawFrame();
 
     void createCommandPool();
     void createFramebuffers();
     void destroyFramebuffers();
+    void createDepthResources();
+    void destroyDepthResources();
     void createCommandBuffers();
     void freeCommandBuffers();
     void createSyncObjects();
@@ -52,13 +63,27 @@ private:
     /// pausing and resuming the spin does not make it jump.
     void advanceRotation();
 
+    /// Fills the uniform buffer slice for `frame` with this frame's matrices,
+    /// camera and light.
+    void updateSceneUniforms(std::uint32_t frame);
+
+    /// Reads a mesh file and puts it on screen. Any failure is reported through
+    /// settings_; the mesh that is already loaded stays.
+    void importMesh(const std::string& path);
+
+    /// Uploads `data`, adopts its material and re-frames the camera on it.
+    void applyMeshData(MeshData data, const std::string& source);
+
     void recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t imageIndex);
     void recreateSwapchain();
 
     const VulkanContext& context_;
     const Window& window_;
 
-    /// Editable at runtime from the toolbar.
+    /// Where the default model lives, handed in by main().
+    const std::string dataDir_;
+
+    /// Editable at runtime from the toolbar and the model window.
     RendererSettings settings_;
 
     std::unique_ptr<Swapchain> swapchain_;
@@ -71,9 +96,22 @@ private:
     /// Declared after material_, whose shaders it was built from.
     std::unique_ptr<GraphicsPipeline> pipeline_;
 
+    /// Declared after pipeline_, whose descriptor set layout it is allocated
+    /// from. That also puts it before the pipeline in the destruction order,
+    /// which is the order the spec wants: the descriptor sets go first, then
+    /// the layout they came from.
+    std::unique_ptr<SceneUniformBuffer> sceneUniforms_;
+
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
     std::vector<VkFramebuffer> framebuffers_;
+
+    /// The depth attachment. One image serves every framebuffer: only one
+    /// render pass is recording into it at a time, and the pass clears it at the
+    /// start of each frame.
+    VkImage depthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory_ = VK_NULL_HANDLE;
+    VkImageView depthView_ = VK_NULL_HANDLE;
 
     /// Declared last so it is torn down before the render pass it points at.
     std::unique_ptr<DebugUi> debugUi_;
@@ -81,6 +119,13 @@ private:
     /// Current spin angle, kept in [0, 2pi) to stay precise over long runs.
     float rotationAngle_ = 0.0f;
     double previousFrameTime_ = 0.0;
+
+    /// The model transform is normalized so that any mesh - however big or off
+    /// center the file made it - is centered on the origin with a bounding
+    /// sphere of radius one. The camera can then orbit the origin at a fixed
+    /// distance and every import is framed the same way.
+    float modelCenter_[3] = {0.0f, 0.0f, 0.0f};
+    float modelScale_ = 1.0f;
 
     /// Signalled when the swapchain image the CPU wants is ready.
     std::vector<VkSemaphore> imageAvailable_;

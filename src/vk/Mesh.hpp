@@ -9,18 +9,21 @@
 class Material;
 class VulkanContext;
 
-/// One vertex as the mesh stores it and as the vertex shader reads it: a 2D
-/// position and an RGB color. This is the vertex format of every mesh in the
-/// renderer, so the layout here, the descriptions below and the `inPosition` /
-/// `inColor` inputs in shaders/triangle.vert have to agree.
+/// One vertex as the mesh stores it and as the vertex shader reads it: a 3D
+/// position, a normal and a texture coordinate. This is the vertex format of
+/// every mesh in the renderer, so the layout here, the descriptions below and
+/// the `inPosition` / `inNormal` / `inTexCoord` inputs in shaders/mesh.vert have
+/// to agree. It is the same set of attributes glTF assigns to POSITION,
+/// NORMAL and TEXCOORD_0, so a loaded mesh fills this struct directly.
 struct Vertex {
-    float position[2];
-    float color[3];
+    float position[3];
+    float normal[3];
+    float uv[2];
 
     /// The binding and attribute descriptions GraphicsPipeline declares for
     /// this vertex format.
     static VkVertexInputBindingDescription bindingDescription();
-    static std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions();
+    static std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions();
 };
 
 /// A triangle mesh: the vertices and indices that describe a surface, the

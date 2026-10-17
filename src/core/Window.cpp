@@ -5,6 +5,18 @@
 #include <iostream>
 #include <stdexcept>
 
+// The native handle accessors live in glfw3native.h, which only declares the
+// accessor for the platforms whose macro is defined. The X11/Wayland backends
+// are deliberately left out: their accessors need the platform headers, and the
+// only consumer (the file dialog) is Windows-only.
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#elif defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#endif
+
 namespace {
 
 void glfwErrorCallback(int code, const char* description) {
@@ -50,6 +62,16 @@ void Window::framebufferResizeCallback(GLFWwindow* window, int /*width*/, int /*
     if (self != nullptr) {
         self->resized_ = true;
     }
+}
+
+void* Window::nativeHandle() const {
+#if defined(_WIN32)
+    return glfwGetWin32Window(window_);
+#elif defined(__APPLE__)
+    return glfwGetCocoaWindow(window_);
+#else
+    return nullptr;
+#endif
 }
 
 VkExtent2D Window::framebufferSize() const {

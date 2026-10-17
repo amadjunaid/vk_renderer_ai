@@ -8,17 +8,26 @@
 class VulkanContext;
 class Material;
 
-/// Push constant block shared with shaders/triangle.vert.
+/// Per-material constants, pushed before every draw.
 ///
 /// The renderer fills this in every frame with vkCmdPushConstants. It must stay
-/// byte-compatible with the `PushConstants` block in the shader: floats need no
-/// padding, but adding a vec2/vec4 (or reordering fields) means matching the
-/// std430 rules the shader compiler applies.
-struct TrianglePushConstants {
-    float angle = 0.0f;  // rotation around the origin, in radians
+/// byte-compatible with the `MaterialPushConstants` block in shaders/mesh.frag:
+/// std430 lines every vec4 up on a 16-byte boundary, so the emissive factor is
+/// padded to four floats here even though the shader only reads three. Adding a
+/// vec2/vec4 or reordering the fields means re-checking that padding.
+struct MaterialPushConstants {
+    float baseColorFactor[4];
+    float emissiveFactor[4];
+    float metallicFactor;
+    float roughnessFactor;
 };
 
 /// The render pass and the single graphics pipeline that draws the mesh.
+///
+/// The pass has two attachments: the swapchain image and a depth buffer, which
+/// is what lets a 3D mesh draw its own far side before its near side. The depth
+/// format is chosen once by the device query below and is then fixed for the
+/// life of the pipeline, so the renderer can build the matching image from it.
 ///
 /// Viewport and scissor are declared as dynamic state, so resizing the window
 /// does not require rebuilding the pipeline - only a change of the swapchain
@@ -43,8 +52,23 @@ public:
     VkPipelineLayout layout() const { return layout_; }
     VkPipeline handle() const { return pipeline_; }
 
+    /// The layout of the scene-wide uniform buffer, bound at set 0 before each
+    /// draw. Renderer builds its SceneUniformBuffer from this.
+    VkDescriptorSetLayout descriptorSetLayout() const { return descriptorSetLayout_; }
+
+    /// The depth attachment format the render pass was built for. Renderer
+    /// creates the depth image and view from it, so both ends agree.
+    VkFormat depthFormat() const { return depthFormat_; }
+
 private:
+    /// Picks the device's preferred depth format among the ones every Vulkan
+    /// implementation is expected to support for rendering. Fixed at
+    /// construction: a mid-run change would mean rebuilding the pass and the
+    /// pipeline for a size change, and no device needs that.
+    static VkFormat chooseDepthFormat(const VulkanContext& context);
+
     void createRenderPass();
+    void createDescriptorSetLayout();
     void createPipeline();
     void destroy();
 
@@ -55,7 +79,9 @@ private:
     const Material& material_;
 
     VkFormat colorFormat_ = VK_FORMAT_UNDEFINED;
+    VkFormat depthFormat_ = VK_FORMAT_UNDEFINED;
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
 };

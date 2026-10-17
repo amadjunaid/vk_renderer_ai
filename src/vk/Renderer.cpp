@@ -1,65 +1,109 @@
 #include "vk/Renderer.hpp"
 
+#include "core/Math.hpp"
 #include "core/Window.hpp"
+#include "io/MeshLoader.hpp"
+#include "vk/Buffer.hpp"
 #include "vk/DebugUi.hpp"
 #include "vk/GraphicsPipeline.hpp"
 #include "vk/Material.hpp"
 #include "vk/Mesh.hpp"
+#include "vk/SceneUniformBuffer.hpp"
 #include "vk/Swapchain.hpp"
 #include "vk/VulkanContext.hpp"
 #include "vk/VkCheck.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace {
 
 constexpr float kTwoPi = 6.28318530718f;
 
-/// The demo mesh: three corners in NDC, one colour each, in the order the vertex
-/// shader used to generate them from gl_VertexIndex. The data lives here rather
-/// than in Mesh so that Mesh stays a container for whatever it is handed - a
-/// mesh loaded from a file fills these same two vectors instead. The layout has
-/// to match Vertex in vk/Mesh.hpp.
-const std::vector<Vertex> kMeshVertices = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-};
-const std::vector<std::uint32_t> kMeshIndices = {0, 1, 2};
+/// The PBR shader pair every material is drawn with. Only the file names are
+/// fixed here, because the directory holding the compiled SPIR-V is only known
+/// at run time (the build passes it in). Importing a mesh never changes the
+/// shaders, only the geometry and the shading parameters, so the pipeline built
+/// from these stays valid for every file the user opens.
+constexpr const char* kMaterialName = "pbr";
+constexpr const char* kMaterialVertexShader = "mesh.vert.spv";
+constexpr const char* kMaterialFragmentShader = "mesh.frag.spv";
 
-/// The demo material: the shader pair the mesh is drawn with, named after the
-/// shape those shaders draw. Only the file names are fixed here, because the
-/// directory holding the compiled SPIR-V is only known at run time (the build
-/// passes it in). Like the mesh data, this sits here so that Material stays a
-/// description of a single shader pair rather than a catalogue of them.
-constexpr const char* kMaterialName = "triangle";
-constexpr const char* kMaterialVertexShader = "triangle.vert.spv";
-constexpr const char* kMaterialFragmentShader = "triangle.frag.spv";
+/// Camera setup, in the renderer's world convention: +Z up, -X forward. The
+/// field of view is the vertical one; the aspect ratio is read from the
+/// swapchain every frame, so a resize needs no camera rebuild.
+constexpr float kFieldOfView = 0.7853982f;  // 45 degrees
+constexpr float kNearPlane = 0.05f;
+constexpr float kFarPlane = 100.0f;
+
+/// Pitch is an elevation above the horizon, clamped just below a right angle:
+/// looking straight down would put the eye directly above the model, where the
+/// up vector is parallel to the view direction and lookAt collapses.
+constexpr float kMaxCameraPitch = 1.5533f;  // 89 degrees
+
+/// The single directional light, in world space. It stays fixed rather than
+/// following the camera, so the shading changes as the mesh spins and its shape
+/// reads clearly. Mostly from above (+Z), tipped towards the -X/+Y side so the
+/// faces the default camera sees are the lit ones. The intensity is folded into
+/// the color.
+constexpr float kLightDirection[3] = {-0.45f, 0.35f, 0.85f};
+constexpr float kLightColor[3] = {2.2f, 2.1f, 2.0f};
+
+/// True for the depth formats that also carry a stencil, which changes the
+/// aspect mask the image view has to declare.
+bool hasStencilComponent(VkFormat format) {
+    return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+}
 
 }  // namespace
 
 Renderer::Renderer(const VulkanContext& context, const Window& window, const std::string& shaderDir,
-                   bool enableDebugUi)
-    : context_(context), window_(window) {
+                   const std::string& dataDir, bool enableDebugUi)
+    : context_(context), window_(window), dataDir_(dataDir) {
     swapchain_ = std::make_unique<Swapchain>(context_, window_);
 
     material_ = std::make_unique<Material>(kMaterialName, shaderDir + "/" + kMaterialVertexShader,
                                            shaderDir + "/" + kMaterialFragmentShader);
-    mesh_ = std::make_unique<Mesh>(context_, kMeshVertices, kMeshIndices, *material_);
     pipeline_ = std::make_unique<GraphicsPipeline>(context_, swapchain_->imageFormat(), *material_);
+    sceneUniforms_ = std::make_unique<SceneUniformBuffer>(context_, pipeline_->descriptorSetLayout(),
+                                                          kMaxFramesInFlight);
 
-    if (enableDebugUi) {
-        // Created after the pipeline because the UI renders into the pipeline's
-        // render pass.
-        debugUi_ = std::make_unique<DebugUi>(context_, window_, pipeline_->renderPass(),
-                                             swapchain_->imageCount(), settings_);
+    // Start on the model the repository ships. A missing or broken data file is
+    // deliberately not fatal: the renderer falls back to a built-in cube and
+    // says so, which beats refusing to open a window over a missing asset.
+    if (dataDir_.empty()) {
+        applyMeshData(makeCubeMesh(), std::string());
+        settings_.statusMessage = "Built-in cube";
+    } else {
+        const std::string defaultModel = dataDir_ + "/" + kDefaultModelFile;
+        try {
+            applyMeshData(loadMesh(defaultModel), defaultModel);
+            settings_.statusMessage = "Loaded the default model";
+        } catch (const std::exception& error) {
+            applyMeshData(makeCubeMesh(), std::string());
+            settings_.statusMessage =
+                std::string("Built-in cube (the default model is unavailable: ") + error.what() + ")";
+            settings_.statusIsError = true;
+        }
     }
 
     createCommandPool();
+    createDepthResources();
     createFramebuffers();
     createCommandBuffers();
     createSyncObjects();
+
+    if (enableDebugUi) {
+        // Created after the pipeline because the UI renders into the pipeline's
+        // render pass, and after the mesh because the model window displays what
+        // the importer found.
+        debugUi_ = std::make_unique<DebugUi>(context_, window_, pipeline_->renderPass(),
+                                             swapchain_->imageCount(), settings_, *material_,
+                                             [this](const std::string& path) { importMesh(path); });
+    }
 
     previousFrameTime_ = window_.elapsedSeconds();
 }
@@ -75,16 +119,20 @@ Renderer::~Renderer() {
     destroySyncObjects();
     freeCommandBuffers();
     destroyFramebuffers();
+    destroyDepthResources();
 
     if (commandPool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device, commandPool_, nullptr);
         commandPool_ = VK_NULL_HANDLE;
     }
 
-    // pipeline_, mesh_, material_, swapchain_ and debugUi_ release their own
-    // Vulkan objects. They are destroyed after this body, in reverse declaration
-    // order, so the mesh goes before the material it borrowed and the UI before
-    // the render pass it draws into.
+    // The rest release their own Vulkan objects. They are destroyed after this
+    // body, in reverse declaration order, so the mesh goes before the material
+    // it borrowed, the descriptor sets before the layout they were allocated
+    // from, and the UI before the render pass it draws into.
+    //
+    // The one thing that must happen first is the wait above: an import may have
+    // been recorded into a command buffer that is still executing.
 }
 
 void Renderer::run() {
@@ -115,6 +163,20 @@ void Renderer::advanceRotation() {
     const double delta = now - previousFrameTime_;
     previousFrameTime_ = now;
 
+    // A request from the Reset view button, or an import, is applied here rather
+    // than in the UI so that the camera the frame was drawn with is always the
+    // one the settings describe.
+    if (settings_.resetViewRequested) {
+        settings_.resetViewRequested = false;
+
+        // RendererSettings holds the defaults, so there is no second copy of
+        // them here to drift out of step.
+        const RendererSettings defaults;
+        settings_.cameraYaw = defaults.cameraYaw;
+        settings_.cameraPitch = defaults.cameraPitch;
+        settings_.cameraDistance = defaults.cameraDistance;
+    }
+
     if (!settings_.rotate) {
         return;
     }
@@ -123,6 +185,114 @@ void Renderer::advanceRotation() {
     // long-running session.
     rotationAngle_ = std::fmod(rotationAngle_ + static_cast<float>(delta) * settings_.rotationSpeed,
                                kTwoPi);
+}
+
+void Renderer::updateSceneUniforms(std::uint32_t frame) {
+    const VkExtent2D extent = swapchain_->extent();
+    const float aspect = extent.height > 0
+                             ? static_cast<float>(extent.width) / static_cast<float>(extent.height)
+                             : 1.0f;
+
+    // Model: spin about the world up axis, centered on the origin, scaled so the
+    // bounding sphere has radius one. Folding the centering and the scale in here
+    // is what lets the camera always orbit the origin, wherever the file put the
+    // mesh and however large it was.
+    const math::Mat4 model = math::multiply(
+        math::rotationZ(rotationAngle_),
+        math::multiply(math::scaling(modelScale_),
+                       math::translation(math::Vec3{-modelCenter_[0], -modelCenter_[1],
+                                                    -modelCenter_[2]})));
+
+    // Orbit camera: the eye swings around the origin on a sphere of the
+    // configured distance, with yaw around the up axis and pitch as elevation.
+    const float pitch = std::clamp(settings_.cameraPitch, -kMaxCameraPitch, kMaxCameraPitch);
+    const float distance = std::max(settings_.cameraDistance, 0.05f);
+    const float cosPitch = std::cos(pitch);
+    const math::Vec3 eye{std::cos(settings_.cameraYaw) * cosPitch * distance,
+                         std::sin(settings_.cameraYaw) * cosPitch * distance,
+                         std::sin(pitch) * distance};
+
+    // Z is up, so that is the reference the camera keeps level.
+    const math::Mat4 view =
+        math::lookAt(eye, math::Vec3{0.0f, 0.0f, 0.0f}, math::Vec3{0.0f, 0.0f, 1.0f});
+    const math::Mat4 projection = math::perspective(kFieldOfView, aspect, kNearPlane, kFarPlane);
+    const math::Mat4 viewProjection = math::multiply(projection, view);
+
+    const math::Vec3 light = math::normalize(
+        math::Vec3{kLightDirection[0], kLightDirection[1], kLightDirection[2]});
+
+    SceneUniforms uniforms{};
+    std::copy_n(model.m, 16, uniforms.model);
+    std::copy_n(viewProjection.m, 16, uniforms.viewProjection);
+    uniforms.cameraPosition[0] = eye.x;
+    uniforms.cameraPosition[1] = eye.y;
+    uniforms.cameraPosition[2] = eye.z;
+    uniforms.cameraPosition[3] = 1.0f;
+    uniforms.lightDirection[0] = light.x;
+    uniforms.lightDirection[1] = light.y;
+    uniforms.lightDirection[2] = light.z;
+    uniforms.lightDirection[3] = 0.0f;
+    uniforms.lightColor[0] = kLightColor[0];
+    uniforms.lightColor[1] = kLightColor[1];
+    uniforms.lightColor[2] = kLightColor[2];
+    uniforms.lightColor[3] = 1.0f;
+
+    sceneUniforms_->update(frame, uniforms);
+}
+
+void Renderer::importMesh(const std::string& path) {
+    try {
+        MeshData data = loadMesh(path);
+        const std::string name = data.name;
+        applyMeshData(std::move(data), path);
+        settings_.statusMessage = "Imported '" + name + "'";
+        settings_.statusIsError = false;
+    } catch (const std::exception& error) {
+        // Whatever is on screen stays: a failed import should not leave the
+        // renderer with nothing to draw.
+        settings_.statusMessage = std::string("Import failed: ") + error.what();
+        settings_.statusIsError = true;
+    }
+}
+
+void Renderer::applyMeshData(MeshData data, const std::string& source) {
+    if (data.vertices.empty() || data.indices.empty()) {
+        throw std::runtime_error("the mesh has no geometry");
+    }
+
+    // Center the mesh and scale it to a bounding sphere of radius one. The
+    // camera and the orbit pivot both assume that, so a millimetre and a
+    // kilometre model land on screen the same way.
+    for (int axis = 0; axis < 3; ++axis) {
+        modelCenter_[axis] = (data.boundsMin[axis] + data.boundsMax[axis]) * 0.5f;
+    }
+    const math::Vec3 diagonal{data.boundsMax[0] - data.boundsMin[0],
+                              data.boundsMax[1] - data.boundsMin[1],
+                              data.boundsMax[2] - data.boundsMin[2]};
+    const float radius = math::length(diagonal) * 0.5f;
+    modelScale_ = radius > 1e-6f ? 1.0f / radius : 1.0f;
+
+    // The buffers about to be replaced may still be read by a frame in flight,
+    // so the device has to go idle first. Building the new mesh before touching
+    // mesh_ also means a throw from the constructor leaves the old one intact.
+    vkDeviceWaitIdle(context_.device());
+    std::unique_ptr<Mesh> mesh = std::make_unique<Mesh>(context_, std::move(data.vertices),
+                                                        std::move(data.indices), *material_);
+    mesh_ = std::move(mesh);
+
+    // The shading parameters travel with the file.
+    material_->setPbr(data.material);
+
+    settings_.modelName = data.name;
+    settings_.modelSource = source;
+    settings_.vertexCount = mesh_->vertexCount();
+    settings_.indexCount = mesh_->indexCount();
+
+    // Frame the newcomer: the previous camera was aimed at a different shape.
+    const RendererSettings cameraDefaults;
+    settings_.cameraYaw = cameraDefaults.cameraYaw;
+    settings_.cameraPitch = cameraDefaults.cameraPitch;
+    settings_.cameraDistance = cameraDefaults.cameraDistance;
 }
 
 void Renderer::createCommandPool() {
@@ -134,6 +304,68 @@ void Renderer::createCommandPool() {
     VK_CHECK(vkCreateCommandPool(context_.device(), &createInfo, nullptr, &commandPool_));
 }
 
+void Renderer::createDepthResources() {
+    const VkDevice device = context_.device();
+    const VkFormat format = pipeline_->depthFormat();
+    const VkExtent2D extent = swapchain_->extent();
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent = {extent.width, extent.height, 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VK_CHECK(vkCreateImage(device, &imageInfo, nullptr, &depthImage_));
+
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(device, depthImage_, &requirements);
+
+    VkMemoryAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.allocationSize = requirements.size;
+    allocateInfo.memoryTypeIndex =
+        findMemoryType(context_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VK_CHECK(vkAllocateMemory(device, &allocateInfo, nullptr, &depthMemory_));
+    VK_CHECK(vkBindImageMemory(device, depthImage_, depthMemory_, 0));
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = depthImage_;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask =
+        VK_IMAGE_ASPECT_DEPTH_BIT |
+        (hasStencilComponent(format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &depthView_));
+}
+
+void Renderer::destroyDepthResources() {
+    const VkDevice device = context_.device();
+
+    if (depthView_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, depthView_, nullptr);
+        depthView_ = VK_NULL_HANDLE;
+    }
+    if (depthImage_ != VK_NULL_HANDLE) {
+        vkDestroyImage(device, depthImage_, nullptr);
+        depthImage_ = VK_NULL_HANDLE;
+    }
+    if (depthMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device, depthMemory_, nullptr);
+        depthMemory_ = VK_NULL_HANDLE;
+    }
+}
+
 void Renderer::createFramebuffers() {
     const VkDevice device = context_.device();
     const std::vector<VkImageView>& views = swapchain_->imageViews();
@@ -142,12 +374,15 @@ void Renderer::createFramebuffers() {
     framebuffers_.resize(views.size());
 
     for (std::size_t i = 0; i < views.size(); ++i) {
-        const VkImageView attachments[] = {views[i]};
+        // The same depth view is attached to every framebuffer: only one render
+        // pass writes into it at a time, and the pass clears it every frame, so
+        // there is nothing to keep per swapchain image.
+        const VkImageView attachments[] = {views[i], depthView_};
 
         VkFramebufferCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         createInfo.renderPass = pipeline_->renderPass();
-        createInfo.attachmentCount = 1;
+        createInfo.attachmentCount = 2;
         createInfo.pAttachments = attachments;
         createInfo.width = extent.width;
         createInfo.height = extent.height;
@@ -251,8 +486,11 @@ void Renderer::recreateSwapchain() {
     vkDeviceWaitIdle(device);
 
     // Framebuffers reference both the swapchain images and the render pass, so
-    // they must be released before either is rebuilt.
+    // they must be released before either is rebuilt. The depth attachment is
+    // referenced by the framebuffers too, and its size has to follow the new
+    // extent.
     destroyFramebuffers();
+    destroyDepthResources();
 
     swapchain_->recreate(window_);
     pipeline_->recreate(swapchain_->imageFormat());
@@ -266,6 +504,7 @@ void Renderer::recreateSwapchain() {
     freeCommandBuffers();
     destroySyncObjects();
 
+    createDepthResources();
     createFramebuffers();
     createCommandBuffers();
     createSyncObjects();
@@ -277,10 +516,18 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
 
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
-    // Providing the clear color explicitly means the render pass can use
-    // VK_ATTACHMENT_LOAD_OP_CLEAR.
-    VkClearValue clearColor{};
-    clearColor.color = {{0.05f, 0.06f, 0.09f, 1.0f}};
+    // The uniforms for this frame slot are written here, at the last moment
+    // before recording: drawFrame() has already waited on the slot's fence, so
+    // no frame that could still be reading the previous contents is in flight.
+    updateSceneUniforms(currentFrame_);
+
+    // Providing the clear values explicitly means the render pass can use
+    // VK_ATTACHMENT_LOAD_OP_CLEAR for both attachments. Depth clears to 1.0, the
+    // far plane, so the first fragment written always passes the depth test.
+    const VkClearValue clearValues[2] = {
+        {{{0.05f, 0.06f, 0.09f, 1.0f}}},
+        {{1.0f, 0.0f}},
+    };
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -288,18 +535,31 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
     renderPassInfo.framebuffer = framebuffers_[imageIndex];
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = swapchain_->extent();
-    renderPassInfo.clearValueCount = 1;
-    renderPassInfo.pClearValues = &clearColor;
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->handle());
 
-    // The vertex shader builds the rotation matrix itself; the CPU only supplies
-    // the angle, which advanceRotation() has already moved on by this frame's
-    // elapsed time.
-    const TrianglePushConstants pushConstants{rotationAngle_};
-    vkCmdPushConstants(commandBuffer, pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
-                       sizeof(pushConstants), &pushConstants);
+    // The scene uniforms come from the descriptor set whose layout the pipeline
+    // was built with, so set 0 is the one it expects.
+    const VkDescriptorSet sceneSet = sceneUniforms_->descriptorSet(currentFrame_);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->layout(), 0, 1,
+                            &sceneSet, 0, nullptr);
+
+    // The material rides in a push constant instead of a second uniform buffer:
+    // it is a handful of floats, and reading it straight from the material every
+    // frame means a value the user just dragged in the UI is in effect for this
+    // very frame.
+    const PbrMaterial& pbr = material_->pbr();
+    MaterialPushConstants materialConstants{};
+    std::copy_n(pbr.baseColorFactor, 4, materialConstants.baseColorFactor);
+    std::copy_n(pbr.emissiveFactor, 3, materialConstants.emissiveFactor);  // fourth stays 0
+    materialConstants.metallicFactor = pbr.metallicFactor;
+    materialConstants.roughnessFactor = pbr.roughnessFactor;
+
+    vkCmdPushConstants(commandBuffer, pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(materialConstants), &materialConstants);
 
     // Viewport and scissor are dynamic state, so they are set every frame.
     const VkExtent2D extent = swapchain_->extent();
@@ -330,9 +590,7 @@ void Renderer::recordCommandBuffer(VkCommandBuffer commandBuffer, std::uint32_t 
     }
 
     vkCmdEndRenderPass(commandBuffer);
-advanceRotation();
 
-    
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 }
 
@@ -369,6 +627,10 @@ void Renderer::drawFrame() {
     VK_CHECK(vkResetFences(device, 1, &inFlightFences_[currentFrame_]));
 
     recordCommandBuffer(commandBuffers_[imageIndex], imageIndex);
+
+    // Moves the spin on for the next frame by the wall-clock time this one took,
+    // and picks up a pending Reset view request.
+    advanceRotation();
 
     const VkSemaphore waitSemaphores[] = {imageAvailable_[currentFrame_]};
     const VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};

@@ -1,5 +1,6 @@
 #include "vk/DebugUi.hpp"
 
+#include "core/FileDialog.hpp"
 #include "core/Window.hpp"
 #include "vk/VulkanContext.hpp"
 #include "vk/VkCheck.hpp"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 
 namespace {
@@ -18,6 +20,10 @@ namespace {
 /// ImGui insists on at least IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE
 /// (8) sampled-image descriptors when it creates its own pool.
 constexpr std::uint32_t kDescriptorPoolSize = 64;
+
+/// Status colours for the last import result.
+const ImVec4 kOkColor{0.55f, 0.85f, 0.55f, 1.0f};
+const ImVec4 kErrorColor{1.0f, 0.5f, 0.4f, 1.0f};
 
 /// ImGui asserts MinImageCount >= 2 and ImageCount >= MinImageCount, which a
 /// swapchain is normally well above - but a surface may cap maxImageCount at 1.
@@ -42,8 +48,14 @@ void checkVkResult(VkResult result) {
 }  // namespace
 
 DebugUi::DebugUi(const VulkanContext& context, const Window& window, VkRenderPass renderPass,
-                 std::uint32_t swapchainImageCount, RendererSettings& settings)
-    : context_(context), settings_(settings), renderPass_(renderPass) {
+                 std::uint32_t swapchainImageCount, RendererSettings& settings, Material& material,
+                 ImportCallback onImportMesh)
+    : context_(context),
+      settings_(settings),
+      material_(material),
+      onImportMesh_(std::move(onImportMesh)),
+      nativeWindow_(window.nativeHandle()),
+      renderPass_(renderPass) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -121,6 +133,11 @@ void DebugUi::beginFrame() {
 void DebugUi::buildUi() {
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::BeginMenu("Import")) {
+                drawImportMenu();
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Esc")) {
                 quitRequested_ = true;
             }
@@ -129,6 +146,7 @@ void DebugUi::buildUi() {
 
         if (ImGui::BeginMenu("View")) {
             ImGui::MenuItem("Toolbar", nullptr, &showToolbar_);
+            ImGui::MenuItem("Model", nullptr, &showModelWindow_);
             ImGui::MenuItem("Dear ImGui Demo", nullptr, &showDemoWindow_);
             ImGui::EndMenu();
         }
@@ -144,6 +162,9 @@ void DebugUi::buildUi() {
     if (showToolbar_) {
         drawToolbar();
     }
+    if (showModelWindow_) {
+        drawModelWindow();
+    }
     if (showDemoWindow_) {
         // The demo is the fastest way to browse what ImGui can draw.
         ImGui::ShowDemoWindow(&showDemoWindow_);
@@ -151,6 +172,96 @@ void DebugUi::buildUi() {
     if (showAboutWindow_) {
         drawAboutWindow();
     }
+}
+
+void DebugUi::drawImportMenu() {
+    const bool hasDialog = filedialog::available();
+
+    if (ImGui::MenuItem("Mesh...", "glTF .glb")) {
+        if (hasDialog) {
+            const std::optional<std::string> path =
+                filedialog::openMeshFile("Import mesh", nativeWindow_);
+            // Nothing to do on cancel: an empty optional means the user closed
+            // the dialog, which is not an error worth reporting.
+            if (path.has_value() && onImportMesh_) {
+                onImportMesh_(*path);
+            }
+        } else if (onImportMesh_ && importPath_[0] != '\0') {
+            // No native dialog on this platform: use the path from the model
+            // window instead of doing nothing, so the menu item still works.
+            onImportMesh_(importPath_);
+        }
+    }
+
+    ImGui::Separator();
+    if (hasDialog) {
+        ImGui::TextDisabled("Supported: .glb");
+    } else {
+        ImGui::TextDisabled("Type a .glb path into the Model window");
+    }
+}
+
+void DebugUi::drawModelWindow() {
+    // A fixed starting width keeps the sliders from being squeezed into the
+    // default auto-fit size on the first frame.
+    ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("Model", &showModelWindow_)) {
+        ImGui::SeparatorText("Mesh");
+        ImGui::Text("Name: %s", settings_.modelName.empty() ? "-" : settings_.modelName.c_str());
+        if (!settings_.modelSource.empty()) {
+            ImGui::TextDisabled("Source: %s", settings_.modelSource.c_str());
+        }
+        ImGui::Text("%u vertices, %u indices (%u triangles)", settings_.vertexCount,
+                    settings_.indexCount, settings_.indexCount / 3);
+
+        if (!filedialog::available()) {
+            // Fallback for platforms without the native dialog: the path field
+            // the Import menu reads.
+            ImGui::SetNextItemWidth(-90.0f);
+            ImGui::InputText("##meshPath", importPath_, sizeof(importPath_));
+            ImGui::SameLine();
+            if (ImGui::Button("Import") && importPath_[0] != '\0') {
+                if (onImportMesh_) {
+                    onImportMesh_(importPath_);
+                }
+            }
+        }
+
+        if (!settings_.statusMessage.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  settings_.statusIsError ? kErrorColor : kOkColor);
+            ImGui::TextWrapped("%s", settings_.statusMessage.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::SeparatorText("Material");
+        ImGui::TextDisabled("%s", material_.pbr().name.c_str());
+
+        // Edited in place: these are the exact values the renderer pushes to the
+        // fragment shader for the next frame.
+        PbrMaterial& pbr = material_.pbr();
+        ImGui::ColorEdit4("Base color", pbr.baseColorFactor, ImGuiColorEditFlags_Float);
+        ImGui::SliderFloat("Metallic", &pbr.metallicFactor, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Roughness", &pbr.roughnessFactor, 0.0f, 1.0f, "%.3f");
+        ImGui::ColorEdit3("Emissive", pbr.emissiveFactor, ImGuiColorEditFlags_Float);
+
+        bool doubleSided = material_.pbr().doubleSided;
+        if (ImGui::Checkbox("Double sided", &doubleSided)) {
+            material_.pbr().doubleSided = doubleSided;
+        }
+        ImGui::TextDisabled("informational: both faces are always drawn");
+
+        ImGui::SeparatorText("Camera");
+        ImGui::TextDisabled("world: +Z up, -X forward");
+        ImGui::SliderFloat("Yaw", &settings_.cameraYaw, -3.1416f, 3.1416f, "%.2f rad");
+        ImGui::SliderFloat("Pitch", &settings_.cameraPitch, -1.5533f, 1.5533f, "%.2f rad");
+        ImGui::SliderFloat("Distance", &settings_.cameraDistance, 0.5f, 20.0f, "%.2f");
+        if (ImGui::Button("Reset view")) {
+            settings_.resetViewRequested = true;
+        }
+    }
+    ImGui::End();
 }
 
 void DebugUi::drawToolbar() {
@@ -184,6 +295,11 @@ void DebugUi::drawToolbar() {
         ImGui::SliderFloat("Speed (rad/s)", &settings_.rotationSpeed, 0.0f, 4.0f, "%.2f");
 
         ImGui::SameLine();
+        if (ImGui::Button("Reset view")) {
+            settings_.resetViewRequested = true;
+        }
+
+        ImGui::SameLine();
         ImGui::TextDisabled("|");
 
         ImGui::SameLine();
@@ -201,6 +317,9 @@ void DebugUi::drawAboutWindow() {
         ImGui::TextWrapped(
             "The UI shares the mesh's render pass, so it is recorded into the same "
             "command buffer.");
+        ImGui::TextWrapped(
+            "File > Import > Mesh loads a binary glTF (.glb) file: its vertices, "
+            "its normals and its material's PBR factors.");
     }
     ImGui::End();
 }

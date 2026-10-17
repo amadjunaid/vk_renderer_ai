@@ -14,12 +14,27 @@
 GraphicsPipeline::GraphicsPipeline(const VulkanContext& context, VkFormat colorFormat,
                                    const Material& material)
     : context_(context), material_(material), colorFormat_(colorFormat) {
+    // The depth format is picked once, before the pass that declares it, because
+    // Renderer needs the same value to create the depth image.
+    depthFormat_ = chooseDepthFormat(context_);
+
     createRenderPass();
+    createDescriptorSetLayout();
     createPipeline();
 }
 
 GraphicsPipeline::~GraphicsPipeline() {
     destroy();
+
+    // The descriptor set layout is not part of destroy(): it does not depend on
+    // the swapchain format, so it has to survive a recreate() - the descriptor
+    // sets allocated from it must stay valid. The owner destroys the sets first
+    // (see the declaration order in Renderer), then this layout goes last.
+    const VkDevice device = context_.device();
+    if (device != VK_NULL_HANDLE && descriptorSetLayout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout_, nullptr);
+        descriptorSetLayout_ = VK_NULL_HANDLE;
+    }
 }
 
 void GraphicsPipeline::destroy() {
@@ -39,20 +54,61 @@ void GraphicsPipeline::destroy() {
     }
 }
 
+VkFormat GraphicsPipeline::chooseDepthFormat(const VulkanContext& context) {
+    // Ordered by preference. D32_SFLOAT has no stencil, which is all this
+    // renderer needs, and a 32-bit float depth buffer is the most precise of
+    // the three; every implementation is expected to support at least one of
+    // them for depth attachment use.
+    const VkFormat candidates[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT,
+                                   VK_FORMAT_D24_UNORM_S8_UINT};
+
+    for (const VkFormat format : candidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(context.physicalDevice(), format, &properties);
+        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+            return format;
+        }
+    }
+
+    throw std::runtime_error("The device offers no depth format this renderer can attach");
+}
+
+void GraphicsPipeline::createDescriptorSetLayout() {
+    // One uniform buffer, read by both stages: the vertex shader needs the
+    // matrices, the fragment shader needs the camera and the light.
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;  // matches `layout(set = 0, binding = 0)` in the shaders
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    binding.pImmutableSamplers = nullptr;
+
+    VkDescriptorSetLayoutCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    createInfo.bindingCount = 1;
+    createInfo.pBindings = &binding;
+
+    VK_CHECK(vkCreateDescriptorSetLayout(context_.device(), &createInfo, nullptr, &descriptorSetLayout_));
+}
+
 void GraphicsPipeline::recreate(VkFormat colorFormat) {
     if (colorFormat == colorFormat_) {
-        // Dynamic viewport/scissor means nothing else depends on the extent.
+        // Dynamic viewport/scissor means nothing else depends on the extent, and
+        // the depth format was already fixed at construction.
         return;
     }
 
     destroy();
     colorFormat_ = colorFormat;
     createRenderPass();
+    // The descriptor set layout is not rebuilt: it does not depend on the
+    // format, and the descriptor sets allocated from it have to stay valid.
     createPipeline();
 }
 
 void GraphicsPipeline::createRenderPass() {
-    // Single color attachment: the presentation image itself.
+    // Two attachments: the presentation image itself, plus the depth buffer that
+    // makes a solid mesh draw correctly. Neither is multisampled.
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = colorFormat_;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -63,28 +119,52 @@ void GraphicsPipeline::createRenderPass() {
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = depthFormat_;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // DONT_CARE is right for a depth buffer that is cleared at the start of
+    // every frame anyway - there is nothing to preserve between them.
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorAttachmentRef{};
     colorAttachmentRef.attachment = 0;
     colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthAttachmentRef{};
+    depthAttachmentRef.attachment = 1;
+    depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorAttachmentRef;
+    subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-    // Wait for the image to be available before writing color to it.
+    // Wait for the image to be available before writing color or depth to it.
+    // The early-fragment-tests stage is included because that is where the depth
+    // test reads and writes.
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependency.srcAccessMask = 0;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    const VkAttachmentDescription attachments[] = {colorAttachment, depthAttachment};
 
     VkRenderPassCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    createInfo.attachmentCount = 1;
-    createInfo.pAttachments = &colorAttachment;
+    createInfo.attachmentCount = 2;
+    createInfo.pAttachments = attachments;
     createInfo.subpassCount = 1;
     createInfo.pSubpasses = &subpass;
     createInfo.dependencyCount = 1;
@@ -148,7 +228,7 @@ void GraphicsPipeline::createPipeline() {
     // The mesh supplies its vertices and indices from device-local buffers, so
     // the pipeline declares the Vertex layout the vertex shader reads.
     const VkVertexInputBindingDescription binding = Vertex::bindingDescription();
-    const std::array<VkVertexInputAttributeDescription, 2> attributes = Vertex::attributeDescriptions();
+    const std::array<VkVertexInputAttributeDescription, 3> attributes = Vertex::attributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -169,14 +249,29 @@ void GraphicsPipeline::createPipeline() {
     viewportState.viewportCount = 1;
     viewportState.scissorCount = 1;
 
+    // Culling stays off: glTF materials that are marked doubleSided - which the
+    // test cube is - need both faces, and the Y flip Vulkan's clip space applies
+    // makes the winding of a singleSided asset a per-file question. Depth
+    // testing alone already hides the far side of a closed mesh.
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;  // keep both faces visible for now
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
+
+    // Depth test on and depth writes on: nearer fragments win and record their
+    // depth so a later, farther fragment cannot paint over them. LESS_OR_EQUAL
+    // rather than LESS so touching surfaces do not flicker.
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -198,15 +293,17 @@ void GraphicsPipeline::createPipeline() {
     dynamicState.dynamicStateCount = 2;
     dynamicState.pDynamicStates = dynamicStates;
 
-    // No descriptors yet: a push constant is enough to get the rotation angle
-    // into the vertex shader, and it avoids descriptor sets entirely.
+    // The per-material constants go to the fragment stage only; the vertex
+    // shader reads the scene uniforms from the descriptor set instead.
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(TrianglePushConstants);
+    pushConstantRange.size = sizeof(MaterialPushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &descriptorSetLayout_;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout_));
@@ -220,6 +317,7 @@ void GraphicsPipeline::createPipeline() {
     pipelineInfo.pViewportState = &viewportState;
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = layout_;

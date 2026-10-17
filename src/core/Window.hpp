@@ -40,6 +40,12 @@ public:
     /// The raw GLFW handle, needed by the ImGui GLFW backend.
     GLFWwindow* handle() const { return window_; }
 
+    /// The OS window handle (an HWND on Windows, an NSWindow on macOS, null
+    /// elsewhere). Native file dialogs take it so the dialog belongs to this
+    /// window instead of floating behind it. Returned as void* so that no
+    /// platform header has to leak into the renderer.
+    void* nativeHandle() const;
+
 private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 
