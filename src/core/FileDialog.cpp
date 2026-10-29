@@ -65,7 +65,8 @@ std::optional<std::string> openMeshFile(const std::string& title, void* ownerWin
 #ifdef _WIN32
     // The filter is a sequence of NUL-separated pairs terminated by an extra
     // NUL, which the literal's own terminator supplies.
-    const wchar_t filter[] = L"glTF binary (*.glb)\0*.glb\0All files (*.*)\0*.*\0";
+    const wchar_t filter[] =
+        L"glTF binary (*.glb)\0*.glb\0FBX (*.fbx)\0*.fbx\0All files (*.*)\0*.*\0";
 
     wchar_t pathBuffer[kPathBuffer] = {};
     const std::wstring wideTitle = toWide(title);

@@ -3,12 +3,15 @@
 #include "core/Math.hpp"
 #include "io/Json.hpp"
 
+#include <ufbx.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -19,8 +22,9 @@
 // ---------------------------------------------------------------------------
 //
 // A .glb file is a small header followed by chunks: one JSON chunk describing
-// the scene and one BIN chunk holding the vertex data. Everything below reads
-// that container; the JSON is handed to io/Json.cpp.
+// the scene and one BIN chunk holding the vertex data. The glTF reader below
+// works on that container; the JSON is handed to io/Json.cpp. The FBX reader
+// further down has no container of its own to parse - ufbx handles that.
 
 namespace {
 
@@ -534,6 +538,29 @@ PbrMaterial readMaterial(const json::Value& material) {
 // Scene graph walk
 // ---------------------------------------------------------------------------
 
+/// Fills in `boundsMin` / `boundsMax` from the vertices.
+///
+/// Bounds are computed after a scene has been flattened because a node
+/// transform can move any primitive anywhere, so nothing but the final vertex
+/// list is reliable.
+void updateBounds(MeshData& data) {
+    if (data.vertices.empty()) {
+        return;
+    }
+
+    for (int axis = 0; axis < 3; ++axis) {
+        data.boundsMin[axis] = data.vertices[0].position[axis];
+        data.boundsMax[axis] = data.vertices[0].position[axis];
+    }
+
+    for (const Vertex& vertex : data.vertices) {
+        for (int axis = 0; axis < 3; ++axis) {
+            data.boundsMin[axis] = std::min(data.boundsMin[axis], vertex.position[axis]);
+            data.boundsMax[axis] = std::max(data.boundsMax[axis], vertex.position[axis]);
+        }
+    }
+}
+
 /// Flattens a glTF scene into one vertex and index buffer.
 ///
 /// glTF describes a tree of nodes that may share meshes, and each mesh may hold
@@ -681,20 +708,214 @@ struct SceneBuilder {
 
     /// Bounds are computed after the walk because a node transform can move any
     /// primitive anywhere.
-    void computeBounds() {
-        if (data.vertices.empty()) {
-            return;
+    void computeBounds() { updateBounds(data); }
+};
+
+// ---------------------------------------------------------------------------
+// FBX
+// ---------------------------------------------------------------------------
+//
+// FBX is read through ufbx, a single-file reader that understands both the
+// binary and the ASCII flavour of the format. It hands back a scene graph much
+// like glTF's, so the walk below mirrors SceneBuilder: every mesh instance is
+// flattened into the same vertex and index pair, with the node transform baked
+// in on the way.
+
+/// The renderer's axes written the way ufbx wants them: which axis points
+/// right, up, and out of the front of an asset.
+///
+/// ufbx rotates the file's own axes (FBX itself permits any) into these while
+/// it loads, baking the change into the geometry and the node transforms, so
+/// nothing below has to know the file's convention. The values match what
+/// worldConventionTransform() does for glTF - +Z up, the front of the asset
+/// towards -X - which is what makes an FBX and a glTF export of the same asset
+/// land the same way round.
+ufbx_coordinate_axes worldAxes() {
+    ufbx_coordinate_axes axes{};
+    axes.right = UFBX_COORDINATE_AXIS_NEGATIVE_Y;
+    axes.up = UFBX_COORDINATE_AXIS_POSITIVE_Z;
+    axes.front = UFBX_COORDINATE_AXIS_NEGATIVE_X;
+    return axes;
+}
+
+std::string fbxText(const ufbx_string& text) {
+    return text.data != nullptr ? std::string(text.data, text.length) : std::string();
+}
+
+/// A material colour map as linear RGBA. FBX colours may be stored with one to
+/// four components, so anything the file does not set comes from `fallback`.
+void readFbxColor(const ufbx_material_map& map, const float fallback[4], float out[4]) {
+    for (int i = 0; i < 4; ++i) {
+        out[i] = fallback[i];
+    }
+    if (!map.has_value) {
+        return;
+    }
+
+    switch (map.value_components) {
+        case 1:
+            out[0] = out[1] = out[2] = static_cast<float>(map.value_real);
+            break;
+        case 2:
+            out[0] = static_cast<float>(map.value_vec2.x);
+            out[1] = static_cast<float>(map.value_vec2.y);
+            break;
+        case 3:
+            out[0] = static_cast<float>(map.value_vec3.x);
+            out[1] = static_cast<float>(map.value_vec3.y);
+            out[2] = static_cast<float>(map.value_vec3.z);
+            break;
+        case 4:
+            out[0] = static_cast<float>(map.value_vec4.x);
+            out[1] = static_cast<float>(map.value_vec4.y);
+            out[2] = static_cast<float>(map.value_vec4.z);
+            out[3] = static_cast<float>(map.value_vec4.w);
+            break;
+        default:
+            break;
+    }
+}
+
+float readFbxFactor(const ufbx_material_map& map, float fallback) {
+    return map.has_value ? static_cast<float>(map.value_real) : fallback;
+}
+
+/// Reads the PBR parameters of one FBX material.
+///
+/// ufbx exposes every shading model the format can carry - Phong, Lambert, a
+/// PBR shader - through the same `pbr` maps, approximating whatever the file
+/// does not state directly. The legacy diffuse colour is only consulted when
+/// the file names no base colour at all.
+PbrMaterial readFbxMaterial(const ufbx_material& material) {
+    PbrMaterial result;
+
+    const std::string name = fbxText(material.name);
+    if (!name.empty()) {
+        result.name = name;
+    }
+
+    constexpr float kWhite[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    constexpr float kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+    readFbxColor(material.pbr.base_color, kWhite, result.baseColorFactor);
+    if (!material.pbr.base_color.has_value) {
+        readFbxColor(material.fbx.diffuse_color, kWhite, result.baseColorFactor);
+    }
+
+    // A model that states no metalness describes a dielectric, which is what
+    // the older FBX shading models are.
+    result.metallicFactor = readFbxFactor(material.pbr.metalness, 0.0f);
+    result.roughnessFactor = readFbxFactor(material.pbr.roughness, 0.5f);
+
+    float emission[4];
+    readFbxColor(material.pbr.emission_color, kBlack, emission);
+    const float emissionFactor = readFbxFactor(material.pbr.emission_factor, 1.0f);
+    for (int i = 0; i < 3; ++i) {
+        result.emissiveFactor[i] = emission[i] * emissionFactor;
+    }
+
+    result.doubleSided = material.features.double_sided.enabled;
+    return result;
+}
+
+/// Flattens an FBX scene into one vertex and index buffer.
+///
+/// Every node that carries a mesh contributes its triangles, with
+/// `geometry_to_world` baked into the positions and the normals taken through
+/// the matching normal matrix. Instanced meshes are walked once per node, which
+/// is why the transform is baked per instance rather than into shared vertex
+/// data.
+struct FbxBuilder {
+    MeshData data;
+    bool materialAssigned = false;
+
+    void appendNode(const ufbx_node* node) {
+        if (node->mesh != nullptr && node->mesh->num_indices > 0) {
+            appendMesh(node);
+        }
+        for (std::size_t i = 0; i < node->children.count; ++i) {
+            appendNode(node->children.data[i]);
+        }
+    }
+
+    void appendMesh(const ufbx_node* node) {
+        const ufbx_mesh& mesh = *node->mesh;
+
+        if (data.name.empty()) {
+            data.name = fbxText(mesh.name);
         }
 
-        for (int axis = 0; axis < 3; ++axis) {
-            data.boundsMin[axis] = data.vertices[0].position[axis];
-            data.boundsMax[axis] = data.vertices[0].position[axis];
+        // ufbx indexes every attribute through one index space, so remembering
+        // which vertex each index was emitted as keeps shared vertices shared
+        // instead of splitting the mesh into loose triangles.
+        constexpr std::uint32_t kNotEmitted = ~std::uint32_t{0};
+        std::vector<std::uint32_t> emitted(mesh.num_indices, kNotEmitted);
+
+        const ufbx_matrix toWorld = node->geometry_to_world;
+        const ufbx_matrix normalToWorld = ufbx_matrix_for_normals(&toWorld);
+        const bool hasNormals = mesh.vertex_normal.exists;
+        const bool hasUvs = mesh.vertex_uv.exists;
+
+        // A face may be a triangle, a quad or an n-gon; ufbx triangulates it,
+        // and `max_face_triangles` bounds how much room that needs.
+        const std::size_t cornerCapacity = std::max<std::size_t>(mesh.max_face_triangles, 1) * 3;
+        std::vector<std::uint32_t> corners(cornerCapacity);
+
+        for (std::size_t faceIndex = 0; faceIndex < mesh.faces.count; ++faceIndex) {
+            const std::uint32_t cornerCount = ufbx_triangulate_face(
+                corners.data(), corners.size(), &mesh, mesh.faces.data[faceIndex]);
+
+            for (std::uint32_t corner = 0; corner < cornerCount * 3; ++corner) {
+                const std::uint32_t index = corners[corner];
+                if (emitted[index] == kNotEmitted) {
+                    const ufbx_vec3 localPosition =
+                        ufbx_get_vertex_vec3(&mesh.vertex_position, index);
+                    const ufbx_vec3 position = ufbx_transform_position(&toWorld, localPosition);
+
+                    Vertex vertex{};
+                    vertex.position[0] = static_cast<float>(position.x);
+                    vertex.position[1] = static_cast<float>(position.y);
+                    vertex.position[2] = static_cast<float>(position.z);
+
+                    if (hasNormals) {
+                        const ufbx_vec3 localNormal =
+                            ufbx_get_vertex_vec3(&mesh.vertex_normal, index);
+                        const ufbx_vec3 normal = ufbx_vec3_normalize(
+                            ufbx_transform_direction(&normalToWorld, localNormal));
+                        vertex.normal[0] = static_cast<float>(normal.x);
+                        vertex.normal[1] = static_cast<float>(normal.y);
+                        vertex.normal[2] = static_cast<float>(normal.z);
+                    }
+
+                    if (hasUvs) {
+                        const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh.vertex_uv, index);
+                        // FBX puts the texture origin at the bottom-left, which
+                        // is already the orientation the shader expects, so
+                        // unlike glTF there is no V flip here.
+                        vertex.uv[0] = static_cast<float>(uv.x);
+                        vertex.uv[1] = static_cast<float>(uv.y);
+                    }
+
+                    emitted[index] = static_cast<std::uint32_t>(data.vertices.size());
+                    data.vertices.push_back(vertex);
+                }
+                data.indices.push_back(emitted[index]);
+            }
         }
 
-        for (const Vertex& vertex : data.vertices) {
-            for (int axis = 0; axis < 3; ++axis) {
-                data.boundsMin[axis] = std::min(data.boundsMin[axis], vertex.position[axis]);
-                data.boundsMax[axis] = std::max(data.boundsMax[axis], vertex.position[axis]);
+        if (!materialAssigned) {
+            // `node->materials` is the per-instance list that the mesh's face
+            // material indices refer to; the mesh's own list is the fallback
+            // for files without instance data.
+            const ufbx_material* material = nullptr;
+            if (node->materials.count > 0) {
+                material = node->materials.data[0];
+            } else if (mesh.materials.count > 0) {
+                material = mesh.materials.data[0];
+            }
+            if (material != nullptr) {
+                data.material = readFbxMaterial(*material);
+                materialAssigned = true;
             }
         }
     }
@@ -740,6 +961,45 @@ MeshData loadGlb(const std::string& path) {
     return std::move(builder.data);
 }
 
+MeshData loadFbx(const std::string& path) {
+    ufbx_load_opts options{};
+    options.target_axes = worldAxes();
+    // Files often store no normals at all; having ufbx generate them keeps the
+    // shading path identical whether they were stored or not.
+    options.generate_missing_normals = true;
+    // Keep geometry transforms in the node transforms instead of baking them
+    // into possibly shared mesh data: the walk above bakes every instance
+    // itself, which is also what keeps an instanced mesh correct.
+    options.geometry_transform_handling = UFBX_GEOMETRY_TRANSFORM_HANDLING_PRESERVE;
+    // The walk above is recursive, so a cyclic hierarchy has to be rejected
+    // here rather than overflowing the stack.
+    options.node_depth_limit = static_cast<std::uint32_t>(kMaxNodeDepth);
+
+    ufbx_error error{};
+    const std::unique_ptr<ufbx_scene, decltype(&ufbx_free_scene)> scene(
+        ufbx_load_file_len(path.data(), path.size(), &options, &error), &ufbx_free_scene);
+    if (!scene) {
+        char message[256] = {};
+        ufbx_format_error(message, sizeof(message), &error);
+        throw std::runtime_error("'" + path + "' is not a readable FBX file: " + message);
+    }
+
+    FbxBuilder builder;
+    // The scene's root node is synthetic: it holds no geometry of its own.
+    for (std::size_t i = 0; i < scene->root_node->children.count; ++i) {
+        builder.appendNode(scene->root_node->children.data[i]);
+    }
+    updateBounds(builder.data);
+
+    if (builder.data.vertices.empty() || builder.data.indices.empty()) {
+        throw std::runtime_error("'" + path + "' contains no triangle geometry");
+    }
+    if (builder.data.name.empty()) {
+        builder.data.name = fileStem(path);
+    }
+    return std::move(builder.data);
+}
+
 MeshData loadMesh(const std::string& path) {
     const std::size_t dot = path.find_last_of('.');
     const std::string extension = dot == std::string::npos ? std::string() : toLower(path.substr(dot));
@@ -747,10 +1007,13 @@ MeshData loadMesh(const std::string& path) {
     if (extension == ".glb") {
         return loadGlb(path);
     }
+    if (extension == ".fbx") {
+        return loadFbx(path);
+    }
     if (extension == ".gltf") {
         throw std::runtime_error("Text .gltf files are not supported; export the mesh as a binary .glb");
     }
-    throw std::runtime_error("Unsupported mesh format '" + extension + "' (supported: .glb)");
+    throw std::runtime_error("Unsupported mesh format '" + extension + "' (supported: .glb, .fbx)");
 }
 
 MeshData makeCubeMesh() {

@@ -177,7 +177,7 @@ void DebugUi::buildUi() {
 void DebugUi::drawImportMenu() {
     const bool hasDialog = filedialog::available();
 
-    if (ImGui::MenuItem("Mesh...", "glTF .glb")) {
+    if (ImGui::MenuItem("Mesh...", "glTF .glb, FBX .fbx")) {
         if (hasDialog) {
             const std::optional<std::string> path =
                 filedialog::openMeshFile("Import mesh", nativeWindow_);
@@ -195,9 +195,9 @@ void DebugUi::drawImportMenu() {
 
     ImGui::Separator();
     if (hasDialog) {
-        ImGui::TextDisabled("Supported: .glb");
+        ImGui::TextDisabled("Supported: .glb, .fbx");
     } else {
-        ImGui::TextDisabled("Type a .glb path into the Model window");
+        ImGui::TextDisabled("Type a .glb or .fbx path into the Model window");
     }
 }
 
@@ -318,8 +318,8 @@ void DebugUi::drawAboutWindow() {
             "The UI shares the mesh's render pass, so it is recorded into the same "
             "command buffer.");
         ImGui::TextWrapped(
-            "File > Import > Mesh loads a binary glTF (.glb) file: its vertices, "
-            "its normals and its material's PBR factors.");
+            "File > Import > Mesh loads a binary glTF (.glb) or an FBX (.fbx) file: its "
+            "vertices, its normals and its material's PBR factors.");
     }
     ImGui::End();
 }

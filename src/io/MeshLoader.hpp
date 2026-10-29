@@ -33,14 +33,20 @@ struct MeshData {
     float boundsMax[3] = {0.0f, 0.0f, 0.0f};
 };
 
-/// Loads a mesh file, picking the reader from the file extension. Throws
-/// std::runtime_error with a message that is short enough to show in the UI.
+/// Loads a mesh file, picking the reader from the file extension: `.glb` or
+/// `.fbx`. Throws std::runtime_error with a message that is short enough to
+/// show in the UI.
 MeshData loadMesh(const std::string& path);
 
 /// Reads a binary glTF container (`.glb`): the JSON chunk that describes the
 /// scene and the BIN chunk that holds the vertex data. The external-buffer
 /// flavour of glTF (`.gltf` plus a `.bin`) is deliberately not supported.
 MeshData loadGlb(const std::string& path);
+
+/// Reads an FBX file, binary or ASCII, through ufbx. The scene is rotated into
+/// the renderer's convention by ufbx while it loads, so what comes back is in
+/// the same world convention as `loadGlb`'s result.
+MeshData loadFbx(const std::string& path);
 
 /// Built-in geometry: a unit cube with per-face normals.
 ///

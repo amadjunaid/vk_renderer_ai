@@ -6,10 +6,10 @@
 /// of glTF's `pbrMetallicRoughness` model that this renderer implements.
 ///
 /// These are the values the fragment shader consumes and the ones an imported
-/// .glb carries, so a loader fills this straight from the file. The factors are
-/// linear (glTF defines them in linear space) and the swapchain is an sRGB
-/// format, so the hardware does the display encoding - nothing here is gamma
-/// corrected by hand.
+/// file carries, so a loader fills this straight from the file. The factors are
+/// linear (glTF defines them in linear space, and an FBX material is converted
+/// into the same model) and the swapchain is an sRGB format, so the hardware
+/// does the display encoding - nothing here is gamma corrected by hand.
 struct PbrMaterial {
     std::string name = "material";
 

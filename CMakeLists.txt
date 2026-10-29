@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(deepseek_vk_renderer
     VERSION 0.1.0
     DESCRIPTION "Minimal Vulkan renderer that draws a triangle"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -100,6 +100,31 @@ target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}/backends)
 
 target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+
+# ---------------------------------------------------------------------------
+# ufbx (FBX import)
+# ---------------------------------------------------------------------------
+
+# FBX is a large proprietary format with no vendor-neutral spec; ufbx is a
+# single-file, MIT-licensed reader for both its binary and ASCII flavour, with
+# no dependencies of its own. It ships no CMakeLists, so the library target is
+# declared by hand, the same way Dear ImGui's is.
+FetchContent_Declare(ufbx
+    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
+    GIT_TAG v0.23.1
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(ufbx)
+
+add_library(ufbx STATIC ${ufbx_SOURCE_DIR}/ufbx.c)
+target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
+
+if(MSVC)
+    # Third-party C code: build it, but do not drown the build log in its warnings.
+    target_compile_options(ufbx PRIVATE /W0)
+    target_compile_definitions(ufbx PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(ufbx PRIVATE -w)
+endif()
 
 # ---------------------------------------------------------------------------
 # Shaders: GLSL -> SPIR-V at build time via glslc (ships with the Vulkan SDK)
@@ -200,7 +225,7 @@ if(WIN32)
     target_link_libraries(vk_triangle PRIVATE comdlg32)
 endif()
 
-target_link_libraries(vk_triangle PRIVATE glfw Vulkan::Vulkan imgui)
+target_link_libraries(vk_triangle PRIVATE glfw Vulkan::Vulkan imgui ufbx)
 add_dependencies(vk_triangle vk_shaders)
 
 if(MSVC)

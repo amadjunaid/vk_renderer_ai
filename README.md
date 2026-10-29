@@ -1,9 +1,10 @@
 # vk_renderer_ai
 
-A minimal Vulkan renderer in C++20 that opens a window, imports a binary glTF
-(`.glb`) mesh and draws it with a physically based material.
+A minimal Vulkan renderer in C++20 that opens a window, imports a mesh from a
+binary glTF (`.glb`) or an FBX (`.fbx`) file and draws it with a physically based
+material.
 
-![status](https://img.shields.io/badge/status-glTF%20import-blue)
+![status](https://img.shields.io/badge/status-glTF%20%2B%20FBX%20import-blue)
 
 ## What it does today
 
@@ -24,6 +25,10 @@ A minimal Vulkan renderer in C++20 that opens a window, imports a binary glTF
   `uint32` indices, normalized integer attributes - node transforms are baked in during a
   walk of the scene graph, and normals are generated for primitives that lack them. The
   data is rotated into the renderer's world on the way in (see *Coordinate system*).
+- Imports FBX files - binary or ASCII - through [ufbx](https://github.com/ufbx/ufbx), a
+  single-file reader fetched by CMake. Node and geometry transforms are baked in per
+  instance (so an instanced mesh is correct), n-gons are triangulated, missing normals are
+  generated, and the file's own axis system is rotated into the renderer's while loading.
 - Renders a `Mesh`: vertices and indices uploaded once into device-local buffers
   through a staging buffer, bound and drawn with `vkCmdDrawIndexed`.
 - Draws the mesh through a `Material` - a shader pair plus the PBR factors of glTF's
@@ -50,7 +55,7 @@ A minimal Vulkan renderer in C++20 that opens a window, imports a binary glTF
 | CMake | 3.20 or newer |
 | C++ compiler | MSVC 2022 (Visual Studio Build Tools are enough), GCC 11+, or Clang 14+ |
 | [Vulkan SDK](https://vulkan.lunarg.com) | Provides the loader, validation layers and `glslc`. On macOS, MoltenVK is mandatory — Windows and Linux have native drivers. |
-| Git | Used by CMake to fetch GLFW |
+| Git | Used by CMake to fetch GLFW, Dear ImGui and ufbx |
 
 On Windows, one way to get everything:
 
@@ -163,19 +168,20 @@ shared because `--config` is ignored by single-config generators.
 ## Project layout
 
 ```
-CMakeLists.txt              build: fetches GLFW + Dear ImGui, finds Vulkan + glslc
+CMakeLists.txt              build: fetches GLFW + Dear ImGui + ufbx, finds Vulkan + glslc
 shaders/
   mesh.vert                 vertex transform, hands world position/normal to the fragment stage
   mesh.frag                 Cook-Torrance PBR shading from the material's glTF factors
 data/
   cube.glb                  the model loaded at start-up
+  cube.fbx, Monkey.fbx      FBX files to try File > Import > Mesh... on
 src/
   main.cpp                  creates the window, context and renderer, then runs it
   core/Math.hpp             Vec3/Mat4, the perspective and lookAt matrices
   core/Window.hpp/.cpp      GLFW lifetime, resize flag, VkSurfaceKHR, native handle
   core/FileDialog.hpp/.cpp  the native open-file dialog (Windows; nullopt elsewhere)
   io/Json.hpp/.cpp          a minimal JSON reader, for the glTF JSON chunk
-  io/MeshLoader.hpp/.cpp    the .glb reader plus the built-in fallback cube
+  io/MeshLoader.hpp/.cpp    the .glb and .fbx readers plus the built-in fallback cube
   vk/VkCheck.hpp            VK_CHECK macro and VkResult -> string helper
   vk/VulkanContext.hpp/.cpp instance, debug messenger, surface, device, queues
   vk/Swapchain.hpp/.cpp     swapchain, image views, format/present-mode/extent selection
@@ -237,9 +243,17 @@ The third row follows from the first two: a rotation that is right-handed can on
 
 The conversion is prepended as the root of the scene-graph walk, so it flows through the
 same matrix as the node transforms - the normal matrix and the bounds pick it up with
-nothing extra to keep in sync. `MeshData` is always handed to the renderer in the world
-convention, which makes adding a format that uses another convention (OBJ, FBX) a matter
-of writing the same conversion, and is why `makeCubeMesh` is authored in it directly.
+nothing extra to keep in sync.
+
+FBX prescribes no axis system of its own - the file declares one - so `loadFbx` does not
+build a matrix by hand. It hands the same world convention to ufbx as
+`ufbx_load_opts.target_axes` (right -Y, up +Z, front -X) and lets the loader rotate the
+geometry and the node transforms into it. An FBX and a glTF export of the same asset
+therefore arrive with the same orientation.
+
+`MeshData` is always handed to the renderer in the world convention, which makes adding a
+format that uses another convention (OBJ) a matter of writing the same conversion, and is
+why `makeCubeMesh` is authored in it directly.
 
 ## Frame loop
 
