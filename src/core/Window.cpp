@@ -45,6 +45,9 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback);
+    // Installed before the ImGui backend initializes, so its own scroll
+    // callback chains to this one instead of replacing it.
+    glfwSetScrollCallback(window_, scrollCallback);
 }
 
 Window::~Window() {
@@ -62,6 +65,19 @@ void Window::framebufferResizeCallback(GLFWwindow* window, int /*width*/, int /*
     if (self != nullptr) {
         self->resized_ = true;
     }
+}
+
+void Window::scrollCallback(GLFWwindow* window, double /*xOffset*/, double yOffset) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    if (self != nullptr) {
+        self->scrollDelta_ += static_cast<float>(yOffset);
+    }
+}
+
+float Window::consumeScrollDelta() const {
+    const float delta = scrollDelta_;
+    scrollDelta_ = 0.0f;
+    return delta;
 }
 
 void* Window::nativeHandle() const {

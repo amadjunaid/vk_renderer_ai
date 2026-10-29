@@ -1,6 +1,7 @@
 #include "vk/Renderer.hpp"
 
 #include "core/Math.hpp"
+#include "core/OrbitCamera.hpp"
 #include "core/Window.hpp"
 #include "io/MeshLoader.hpp"
 #include "vk/Buffer.hpp"
@@ -14,14 +15,11 @@
 #include "vk/VkCheck.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace {
-
-constexpr float kTwoPi = 6.28318530718f;
 
 /// The PBR shader pair every material is drawn with. Only the file names are
 /// fixed here, because the directory holding the compiled SPIR-V is only known
@@ -39,18 +37,55 @@ constexpr float kFieldOfView = 0.7853982f;  // 45 degrees
 constexpr float kNearPlane = 0.05f;
 constexpr float kFarPlane = 100.0f;
 
-/// Pitch is an elevation above the horizon, clamped just below a right angle:
-/// looking straight down would put the eye directly above the model, where the
-/// up vector is parallel to the view direction and lookAt collapses.
-constexpr float kMaxCameraPitch = 1.5533f;  // 89 degrees
+/// Zoom steps per pixel of vertical drag for Ctrl+middle-drag zoom. A positive
+/// step moves the eye closer, and dragging up is negative cursor movement, so
+/// the sign is flipped where it is used.
+constexpr float kZoomDragStepsPerPixel = 0.05f;
 
 /// The single directional light, in world space. It stays fixed rather than
-/// following the camera, so the shading changes as the mesh spins and its shape
-/// reads clearly. Mostly from above (+Z), tipped towards the -X/+Y side so the
-/// faces the default camera sees are the lit ones. The intensity is folded into
-/// the color.
+/// following the camera, so the shading changes as the view moves around the
+/// model and its shape reads clearly. Mostly from above (+Z), tipped towards the
+/// -X/+Y side so the faces the default camera sees are the lit ones. The
+/// intensity is folded into the color.
 constexpr float kLightDirection[3] = {-0.45f, 0.35f, 0.85f};
 constexpr float kLightColor[3] = {2.2f, 2.1f, 2.0f};
+
+/// True while the navigation button is held. Every desktop has a middle mouse
+/// button except the Mac trackpad, so on macOS - as in Blender - Option+drag
+/// stands in for the missing button.
+bool navigationButtonDown(GLFWwindow* window) {
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
+        return true;
+    }
+#if defined(__APPLE__)
+    const bool option = glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+                        glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
+    return option && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+#else
+    return false;
+#endif
+}
+
+/// Ctrl while dragging zooms. macOS users reach for Cmd, and Cmd is the only
+/// modifier that works there: the system turns Ctrl+click into a right click,
+/// which arranges for the drag never to start.
+bool zoomModifierDown(GLFWwindow* window) {
+    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) {
+        return true;
+    }
+#if defined(__APPLE__)
+    return glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS ||
+           glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS;
+#else
+    return false;
+#endif
+}
+
+bool shiftDown(GLFWwindow* window) {
+    return glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+           glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+}
 
 /// True for the depth formats that also carry a stencil, which changes the
 /// aspect mask the image view has to declare.
@@ -105,7 +140,9 @@ Renderer::Renderer(const VulkanContext& context, const Window& window, const std
                                              [this](const std::string& path) { importMesh(path); });
     }
 
-    previousFrameTime_ = window_.elapsedSeconds();
+    // The camera starts from wherever the pointer is, so the first drag does
+    // not begin with a delta measured from (0, 0).
+    glfwGetCursorPos(window_.handle(), &lastCursorX_, &lastCursorY_);
 }
 
 Renderer::~Renderer() {
@@ -158,33 +195,64 @@ void Renderer::run() {
     vkDeviceWaitIdle(context_.device());
 }
 
-void Renderer::advanceRotation() {
-    const double now = window_.elapsedSeconds();
-    const double delta = now - previousFrameTime_;
-    previousFrameTime_ = now;
-
-    // A request from the Reset view button, or an import, is applied here rather
-    // than in the UI so that the camera the frame was drawn with is always the
-    // one the settings describe.
+void Renderer::updateCamera() {
     if (settings_.resetViewRequested) {
         settings_.resetViewRequested = false;
-
-        // RendererSettings holds the defaults, so there is no second copy of
-        // them here to drift out of step.
-        const RendererSettings defaults;
-        settings_.cameraYaw = defaults.cameraYaw;
-        settings_.cameraPitch = defaults.cameraPitch;
-        settings_.cameraDistance = defaults.cameraDistance;
+        settings_.camera.reset();
     }
 
-    if (!settings_.rotate) {
+    GLFWwindow* const handle = window_.handle();
+    if (handle == nullptr) {
         return;
     }
 
-    // Wrapping keeps the angle small so float precision does not degrade over a
-    // long-running session.
-    rotationAngle_ = std::fmod(rotationAngle_ + static_cast<float>(delta) * settings_.rotationSpeed,
-                               kTwoPi);
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetCursorPos(handle, &cursorX, &cursorY);
+    const float deltaX = static_cast<float>(cursorX - lastCursorX_);
+    const float deltaY = static_cast<float>(cursorY - lastCursorY_);
+    lastCursorX_ = cursorX;
+    lastCursorY_ = cursorY;
+
+    // The pointer being over a panel means it belongs to that panel, not to the
+    // camera. A drag that started in the viewport keeps going, though - see
+    // navigating_.
+    const bool overUi = debugUi_ && debugUi_->wantsMouseCapture();
+
+    const float scroll = window_.consumeScrollDelta();
+    if (!overUi && scroll != 0.0f) {
+        settings_.camera.dolly(scroll);
+    }
+
+    const bool buttonDown = navigationButtonDown(handle);
+    if (!buttonDown) {
+        navigating_ = false;
+        return;
+    }
+    if (overUi && !navigating_) {
+        return;
+    }
+    navigating_ = true;
+
+    // Read per frame rather than latched at the start of the drag, so the
+    // modifier can be changed without letting go of the button.
+    if (zoomModifierDown(handle)) {
+        // Dragging up pulls the pivot towards the eye, so up is zoom in.
+        settings_.camera.dolly(-deltaY * kZoomDragStepsPerPixel);
+    } else if (shiftDown(handle)) {
+        // Cursor deltas are in screen coordinates - the units glfwGetWindowSize
+        // reports - while the swapchain extent is in pixels, and the two differ
+        // by the content scale on a Retina or high-DPI display. Panning has to
+        // divide by the size the cursor is measured in, or it would move half
+        // as far as the pointer on such a display.
+        int windowHeight = 0;
+        glfwGetWindowSize(handle, nullptr, &windowHeight);
+        settings_.camera.pan(deltaX, deltaY,
+                             settings_.camera.worldPerPixel(kFieldOfView,
+                                                            static_cast<float>(windowHeight)));
+    } else {
+        settings_.camera.orbit(deltaX, deltaY);
+    }
 }
 
 void Renderer::updateSceneUniforms(std::uint32_t frame) {
@@ -193,28 +261,17 @@ void Renderer::updateSceneUniforms(std::uint32_t frame) {
                              ? static_cast<float>(extent.width) / static_cast<float>(extent.height)
                              : 1.0f;
 
-    // Model: spin about the world up axis, centered on the origin, scaled so the
-    // bounding sphere has radius one. Folding the centering and the scale in here
-    // is what lets the camera always orbit the origin, wherever the file put the
-    // mesh and however large it was.
-    const math::Mat4 model = math::multiply(
-        math::rotationZ(rotationAngle_),
+    // Model: centered on the origin and scaled so the bounding sphere has
+    // radius one. Folding the centering and the scale in here is what lets the
+    // camera always frame the model, wherever the file put it and however large
+    // it was.
+    const math::Mat4 model =
         math::multiply(math::scaling(modelScale_),
                        math::translation(math::Vec3{-modelCenter_[0], -modelCenter_[1],
-                                                    -modelCenter_[2]})));
+                                                    -modelCenter_[2]}));
 
-    // Orbit camera: the eye swings around the origin on a sphere of the
-    // configured distance, with yaw around the up axis and pitch as elevation.
-    const float pitch = std::clamp(settings_.cameraPitch, -kMaxCameraPitch, kMaxCameraPitch);
-    const float distance = std::max(settings_.cameraDistance, 0.05f);
-    const float cosPitch = std::cos(pitch);
-    const math::Vec3 eye{std::cos(settings_.cameraYaw) * cosPitch * distance,
-                         std::sin(settings_.cameraYaw) * cosPitch * distance,
-                         std::sin(pitch) * distance};
-
-    // Z is up, so that is the reference the camera keeps level.
-    const math::Mat4 view =
-        math::lookAt(eye, math::Vec3{0.0f, 0.0f, 0.0f}, math::Vec3{0.0f, 0.0f, 1.0f});
+    const math::Vec3 eye = settings_.camera.eye();
+    const math::Mat4 view = settings_.camera.viewMatrix();
     const math::Mat4 projection = math::perspective(kFieldOfView, aspect, kNearPlane, kFarPlane);
     const math::Mat4 viewProjection = math::multiply(projection, view);
 
@@ -289,10 +346,7 @@ void Renderer::applyMeshData(MeshData data, const std::string& source) {
     settings_.indexCount = mesh_->indexCount();
 
     // Frame the newcomer: the previous camera was aimed at a different shape.
-    const RendererSettings cameraDefaults;
-    settings_.cameraYaw = cameraDefaults.cameraYaw;
-    settings_.cameraPitch = cameraDefaults.cameraPitch;
-    settings_.cameraDistance = cameraDefaults.cameraDistance;
+    settings_.camera.reset();
 }
 
 void Renderer::createCommandPool() {
@@ -628,9 +682,9 @@ void Renderer::drawFrame() {
 
     recordCommandBuffer(commandBuffers_[imageIndex], imageIndex);
 
-    // Moves the spin on for the next frame by the wall-clock time this one took,
-    // and picks up a pending Reset view request.
-    advanceRotation();
+    // Applies this frame's camera input, and picks up a pending Reset view
+    // request, before the frame is recorded.
+    updateCamera();
 
     const VkSemaphore waitSemaphores[] = {imageAvailable_[currentFrame_]};
     const VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};

@@ -99,21 +99,6 @@ inline Mat4 scaling(float scale) {
     return result;
 }
 
-/// Rotation around the world Z axis. Z is the up axis, so this is the spin that
-/// turns a mesh about its own vertical axis; it is also the axis the orbit
-/// camera swings around.
-inline Mat4 rotationZ(float radians) {
-    const float c = std::cos(radians);
-    const float s = std::sin(radians);
-
-    Mat4 result;
-    result.m[0] = c;
-    result.m[1] = s;
-    result.m[4] = -s;
-    result.m[5] = c;
-    return result;
-}
-
 /// Right-handed perspective projection writing Vulkan clip space.
 ///
 /// Two differences from the OpenGL version of this matrix matter:

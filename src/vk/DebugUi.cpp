@@ -25,6 +25,15 @@ constexpr std::uint32_t kDescriptorPoolSize = 64;
 const ImVec4 kOkColor{0.55f, 0.85f, 0.55f, 1.0f};
 const ImVec4 kErrorColor{1.0f, 0.5f, 0.4f, 1.0f};
 
+/// How the viewport is navigated, spelled out for the platform: a Mac trackpad
+/// has no middle button, so the emulation the renderer accepts for it is the
+/// one worth advertising there.
+#if defined(__APPLE__)
+constexpr const char* kNavigationHint = "Option+drag orbit, +Shift pan, +Cmd or wheel zoom";
+#else
+constexpr const char* kNavigationHint = "MMB orbit, Shift+MMB pan, Ctrl+MMB or wheel zoom";
+#endif
+
 /// ImGui asserts MinImageCount >= 2 and ImageCount >= MinImageCount, which a
 /// swapchain is normally well above - but a surface may cap maxImageCount at 1.
 std::uint32_t clampImageCount(std::uint32_t swapchainImageCount) {
@@ -253,10 +262,18 @@ void DebugUi::drawModelWindow() {
         ImGui::TextDisabled("informational: both faces are always drawn");
 
         ImGui::SeparatorText("Camera");
+        ImGui::TextWrapped("viewport: %s", kNavigationHint);
         ImGui::TextDisabled("world: +Z up, -X forward");
-        ImGui::SliderFloat("Yaw", &settings_.cameraYaw, -3.1416f, 3.1416f, "%.2f rad");
-        ImGui::SliderFloat("Pitch", &settings_.cameraPitch, -1.5533f, 1.5533f, "%.2f rad");
-        ImGui::SliderFloat("Distance", &settings_.cameraDistance, 0.5f, 20.0f, "%.2f");
+        ImGui::SliderFloat("Yaw", &settings_.camera.yaw, -3.1416f, 3.1416f, "%.2f rad");
+        ImGui::SliderFloat("Pitch", &settings_.camera.pitch, OrbitCamera::kMinPitch,
+                           OrbitCamera::kMaxPitch, "%.2f rad");
+        ImGui::SliderFloat("Distance", &settings_.camera.distance, OrbitCamera::kMinDistance,
+                           OrbitCamera::kMaxDistance, "%.2f");
+        float pivot[3] = {settings_.camera.target.x, settings_.camera.target.y,
+                          settings_.camera.target.z};
+        if (ImGui::DragFloat3("Pivot", pivot, 0.01f)) {
+            settings_.camera.target = math::Vec3{pivot[0], pivot[1], pivot[2]};
+        }
         if (ImGui::Button("Reset view")) {
             settings_.resetViewRequested = true;
         }
@@ -281,23 +298,15 @@ void DebugUi::drawToolbar() {
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     if (ImGui::Begin("##toolbar", nullptr, flags)) {
-        if (ImGui::Button(settings_.rotate ? "Pause" : "Play")) {
-            settings_.rotate = !settings_.rotate;
-        }
-
-        ImGui::SameLine();
-        if (ImGui::Button("Reset speed")) {
-            settings_.rotationSpeed = RendererSettings{}.rotationSpeed;
-        }
-
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(200.0f);
-        ImGui::SliderFloat("Speed (rad/s)", &settings_.rotationSpeed, 0.0f, 4.0f, "%.2f");
-
-        ImGui::SameLine();
         if (ImGui::Button("Reset view")) {
             settings_.resetViewRequested = true;
         }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", kNavigationHint);
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");
@@ -322,6 +331,12 @@ void DebugUi::drawAboutWindow() {
             "vertices, its normals and its material's PBR factors.");
     }
     ImGui::End();
+}
+
+bool DebugUi::wantsMouseCapture() const {
+    // Only meaningful after beginFrame(), which the renderer calls before it
+    // updates the camera, so the answer matches the frame being built.
+    return ImGui::GetIO().WantCaptureMouse;
 }
 
 void DebugUi::render(VkCommandBuffer commandBuffer) const {

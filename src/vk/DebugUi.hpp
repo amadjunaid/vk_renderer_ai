@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/OrbitCamera.hpp"
 #include "vk/Material.hpp"
 
 #include <vulkan/vulkan.h>
@@ -19,24 +20,15 @@ class Window;
 /// parameters are not in here - they live in the Material, which the UI is
 /// handed separately, because that is where the renderer reads them from.
 struct RendererSettings {
-    /// Spins the mesh around its vertical axis. The angle itself lives in the
-    /// renderer; these two only drive it.
-    bool rotate = true;
-    float rotationSpeed = 0.75f;  // radians per second
-
-    /// Orbit camera, in the renderer's world convention (+Z up, -X forward).
-    /// Angles are radians: yaw swings around the up axis - 0 puts the eye on
-    /// +X, and the default looks from -X, which is the side an imported mesh
-    /// faces. The distance is in world units relative to a model that the
-    /// renderer normalizes to a radius of one, so the default frames any
-    /// imported mesh the same way.
-    float cameraYaw = 2.3561945f;   // 135 degrees
-    float cameraPitch = 0.35f;
-    float cameraDistance = 3.0f;
+    /// The viewport camera. It is owned here so that the mouse navigation in
+    /// the renderer and the sliders in the model window move the same camera -
+    /// there is no copy to keep in step.
+    OrbitCamera camera;
 
     /// Raised by the Reset view button and cleared by the renderer once the
     /// camera is back at its defaults. A request rather than an action because
-    /// the UI has no camera to reset - it only edits these three numbers.
+    /// the renderer is the one that applies it, so the camera a frame was
+    /// drawn with is always the one the settings describe.
     bool resetViewRequested = false;
 
     // --- Filled in by the renderer, displayed read-only ----------------------
@@ -93,6 +85,11 @@ public:
 
     /// The render pass the UI pipeline was built against.
     VkRenderPass renderPass() const { return renderPass_; }
+
+    /// True while the pointer or the keyboard is over an ImGui window. Camera
+    /// navigation checks this so that dragging a slider does not also orbit
+    /// the view.
+    bool wantsMouseCapture() const;
 
     /// True once the user picked File > Quit.
     bool wantsQuit() const { return quitRequested_; }

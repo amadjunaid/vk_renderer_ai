@@ -59,9 +59,13 @@ private:
     void createSyncObjects();
     void destroySyncObjects();
 
-    /// Advances rotationAngle_ using the time since the previous frame, so
-    /// pausing and resuming the spin does not make it jump.
-    void advanceRotation();
+    /// Applies the Reset view request and this frame's mouse and wheel input to
+    /// settings_.camera, the way Blender's viewport does: middle-drag orbits,
+    /// Shift+middle-drag pans and the wheel (or Ctrl+middle-drag) zooms. On
+    /// macOS, where a trackpad has no middle button, Option+drag stands in for
+    /// it and Cmd works as the zoom modifier. Input that belongs to an ImGui
+    /// window is left alone.
+    void updateCamera();
 
     /// Fills the uniform buffer slice for `frame` with this frame's matrices,
     /// camera and light.
@@ -116,14 +120,22 @@ private:
     /// Declared last so it is torn down before the render pass it points at.
     std::unique_ptr<DebugUi> debugUi_;
 
-    /// Current spin angle, kept in [0, 2pi) to stay precise over long runs.
-    float rotationAngle_ = 0.0f;
-    double previousFrameTime_ = 0.0;
+    /// Cursor position from the previous frame, so a drag turns into a delta.
+    /// Tracked even while no button is down, so the first frame of a drag never
+    /// starts with the jump from wherever the pointer last was.
+    double lastCursorX_ = 0.0;
+    double lastCursorY_ = 0.0;
+
+    /// True while a middle-button drag that started in the viewport is in
+    /// progress. A drag keeps steering the camera even when it wanders over an
+    /// ImGui window, because letting go of the camera mid-gesture is worse than
+    /// ignoring the panel it passes.
+    bool navigating_ = false;
 
     /// The model transform is normalized so that any mesh - however big or off
     /// center the file made it - is centered on the origin with a bounding
-    /// sphere of radius one. The camera can then orbit the origin at a fixed
-    /// distance and every import is framed the same way.
+    /// sphere of radius one. The camera's default pivot is the origin, so every
+    /// import is framed the same way.
     float modelCenter_[3] = {0.0f, 0.0f, 0.0f};
     float modelScale_ = 1.0f;
 

@@ -193,6 +193,7 @@ add_custom_target(vk_shaders DEPENDS ${SHADER_SPIRV})
 add_executable(vk_triangle
     src/main.cpp
     src/core/FileDialog.cpp
+    src/core/OrbitCamera.cpp
     src/core/Window.cpp
     src/io/Json.cpp
     src/io/MeshLoader.cpp

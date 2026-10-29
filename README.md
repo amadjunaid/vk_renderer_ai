@@ -41,7 +41,8 @@ material.
   descriptor set, and the per-material factors through a push constant.
 - Renders with 2 frames in flight, using per-frame fences, per-image present semaphores
   and per-image command buffers.
-- Spins the mesh and orbits a perspective camera, both editable at runtime.
+- Orbits a perspective camera around the mesh with Blender-style viewport navigation:
+  middle-drag orbits, Shift+middle-drag pans, the wheel (or Ctrl+middle-drag) zooms.
 - Draws a Dear ImGui menu bar, toolbar and model window into the same render pass as the
   mesh, so the UI needs no render pass, framebuffers or descriptor sets of its own. The
   model window shows what was imported and edits the material and camera live.
@@ -159,7 +160,11 @@ comes from `glslang-tools`.
 missing, the renderer prints a warning and continues without it.
 
 **macOS** needs the portability extensions described above; this is handled automatically,
-but it is why the code checks extension availability before enabling anything.
+but it is why the code checks extension availability before enabling anything. The
+viewport camera takes this into account too: a trackpad has no middle button, so
+Option+drag emulates it (orbit; add Shift to pan) and Cmd stands in for Ctrl as the
+zoom-drag modifier - the system turns Ctrl+click into a right click, so Ctrl cannot be used
+there. Pinch-less trackpads still zoom with a two-finger scroll.
 
 **`.vscode/launch.json`** has one configuration per platform — pick the one matching your
 OS (Windows uses `cppvsdbg`, macOS/Linux use `cppdbg` with lldb/gdb). The build task is
@@ -178,7 +183,8 @@ data/
 src/
   main.cpp                  creates the window, context and renderer, then runs it
   core/Math.hpp             Vec3/Mat4, the perspective and lookAt matrices
-  core/Window.hpp/.cpp      GLFW lifetime, resize flag, VkSurfaceKHR, native handle
+  core/OrbitCamera.hpp/.cpp the viewport camera and its Blender-style navigation
+  core/Window.hpp/.cpp      GLFW lifetime, resize flag, wheel delta, VkSurfaceKHR, native handle
   core/FileDialog.hpp/.cpp  the native open-file dialog (Windows; nullopt elsewhere)
   io/Json.hpp/.cpp          a minimal JSON reader, for the glTF JSON chunk
   io/MeshLoader.hpp/.cpp    the .glb and .fbx readers plus the built-in fallback cube
@@ -224,9 +230,9 @@ directly.
 ## Coordinate system
 
 The renderer's world is right-handed with **+Z up and -X forward**, and everything follows
-from that: the camera orbits the origin with +Z as its up vector, the toolbar's spin is a
-rotation about +Z, the directional light comes mostly from +Z, and the ambient term in the
-fragment shader weighs the normal's Z component.
+from that: the camera orbits its pivot with +Z as its up vector, yaw swings about +Z and
+pitch is an elevation above the horizon, the directional light comes mostly from +Z, and
+the ambient term in the fragment shader weighs the normal's Z component.
 
 glTF is +Y up, and its spec says the front of an asset faces +Z, so
 `io/MeshLoader.cpp` rotates every imported file into the renderer's convention with
@@ -256,6 +262,9 @@ format that uses another convention (OBJ) a matter of writing the same conversio
 why `makeCubeMesh` is authored in it directly.
 
 ## Frame loop
+
+Before the steps below, `Renderer::updateCamera()` applies this frame's mouse and wheel
+input to the camera (see *Debug UI* for the gestures).
 
 Each iteration of `Renderer::drawFrame()`:
 
@@ -311,6 +320,26 @@ screen and reports the error in red in the model window, because losing the mesh
 looking at is a worse outcome than the message. On Windows the dialog is
 `GetOpenFileNameW` (hence the `comdlg32` link); elsewhere `filedialog::available()`
 returns false and the model window shows a path box the same menu item reads instead.
+
+**Camera navigation.** The viewport is navigated the way Blender's is. `core/OrbitCamera`
+holds a pivot, a yaw, a pitch and a distance: middle-drag orbits the eye around the pivot,
+Shift+middle-drag slides the pivot in the view plane, and the wheel or Ctrl+middle-drag
+changes the orbit distance. On macOS the middle button is emulated with Option+drag and
+Cmd replaces Ctrl (see *Platform notes*). The state lives in `RendererSettings::camera`, so
+the model window's sliders and the mouse edit the same numbers, and Reset view returns to
+the framing a freshly imported mesh gets.
+
+`Renderer::updateCamera` polls GLFW once per frame rather than reacting to callbacks, so
+every frame sees one consistent set of deltas. It ignores input while the pointer is over
+an ImGui window (`DebugUi::wantsMouseCapture`) but keeps a drag alive once it has started
+in the viewport, because losing the camera mid-gesture is worse than ignoring the panel it
+passes over. The wheel arrives through `Window`, which installs its scroll callback before
+the ImGui backend is initialized - the backend chains to the previous callback instead of
+replacing it, which is what lets the delta be consumed in one place.
+
+Panning divides the cursor movement by the window height in **screen coordinates**, not by
+the swapchain extent: cursor deltas are measured in screen coordinates while the extent is
+in pixels, and on a Retina or high-DPI display the two differ by the content scale.
 
 ## Next steps
 

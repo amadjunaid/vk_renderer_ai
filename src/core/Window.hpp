@@ -22,8 +22,12 @@ public:
     bool shouldClose() const { return glfwWindowShouldClose(window_) != 0; }
     void pollEvents() const { glfwPollEvents(); }
 
-    /// Seconds elapsed since GLFW was initialized; drives animation.
-    double elapsedSeconds() const { return glfwGetTime(); }
+    /// Mouse-wheel movement accumulated since the previous call, in GLFW's
+    /// units: positive when the wheel is rolled away from the user. Consuming
+    /// it here rather than through a callback keeps the camera navigation with
+    /// the code that owns the camera; the ImGui backend chains to this
+    /// window's callback, so the value is captured even with the UI running.
+    float consumeScrollDelta() const;
 
     /// Current drawable size in pixels. Zero while the window is minimized.
     VkExtent2D framebufferSize() const;
@@ -48,9 +52,13 @@ public:
 
 private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
+    static void scrollCallback(GLFWwindow* window, double xOffset, double yOffset);
 
     GLFWwindow* window_ = nullptr;
 
     /// Written by the GLFW callback, consumed by the render loop.
     mutable bool resized_ = false;
+
+    /// Wheel movement not yet read by consumeScrollDelta().
+    mutable float scrollDelta_ = 0.0f;
 };
